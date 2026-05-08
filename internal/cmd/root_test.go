@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -39,15 +40,20 @@ func TestEnsureServerTCPHealthy(t *testing.T) {
 func TestEnsureServerTCPUnreachable(t *testing.T) {
 	t.Parallel()
 
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
 	hostURL := &url.URL{
 		Scheme: "tcp",
-		Host:   "127.0.0.1:1",
+		Host:   addr,
 	}
 
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 
-	err := ensureServer(cmd, hostURL)
+	err = ensureServer(cmd, hostURL)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to connect to remote crush server")
 }

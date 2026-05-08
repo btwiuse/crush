@@ -432,7 +432,7 @@ func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
 			return err
 		}
 	default:
-		return fmt.Errorf("unsupported server protocol: %s", hostURL.Scheme)
+		return fmt.Errorf("unsupported server protocol %q (supported: unix, npipe, tcp)", hostURL.Scheme)
 	}
 
 	return nil
