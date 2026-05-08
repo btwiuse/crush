@@ -9,13 +9,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/btwiuse/boba"
-	tea "charm.land/bubbletea/v2"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
@@ -60,33 +63,57 @@ func main() {
 
 // ── mock config ──────────────────────────────────────────────────────────────
 
-// newMockConfig returns a minimal *config.Config that satisfies:
-//   - IsConfigured() == true  (at least one enabled provider)
-//   - non-nil Options and Options.TUI  (required by ui.New)
+// newMockConfig returns a *config.Config preconfigured for the demo.
 func newMockConfig() *config.Config {
 	providers := csync.NewMap[string, config.ProviderConfig]()
-	providers.Set("mock", config.ProviderConfig{
-		ID:   "mock",
-		Name: "Mock Provider (demo)",
+	providers.Set("deepseek", config.ProviderConfig{
+		ID:      "deepseek",
+		Name:    "DeepSeek",
+		Type:    catwalk.TypeOpenAICompat,
+		APIKey:  "$DEEPSEEK_API_KEY",
+		BaseURL: "https://api.deepseek.com/v1",
+		Models: []catwalk.Model{
+			{
+				ID:            "deepseek-chat",
+				Name:          "DeepSeek Chat",
+				ContextWindow: 1000000,
+			},
+			{
+				ID:            "deepseek-reasoner",
+				Name:          "DeepSeek Reasoner",
+				ContextWindow: 1000000,
+			},
+		},
 	})
 
+	var transparent = false
 	return &config.Config{
 		Providers: providers,
 		Models: map[config.SelectedModelType]config.SelectedModel{
-			config.SelectedModelTypeLarge: {
-				Provider: "deepseek",
-				Model:    "deepseek-chat",
-			},
 			config.SelectedModelTypeSmall: {
 				Provider: "deepseek",
 				Model:    "deepseek-chat",
 			},
+			config.SelectedModelTypeLarge: {
+				Provider: "deepseek",
+				Model:    "deepseek-chat",
+			},
 		},
-		RecentModels: map[config.SelectedModelType][]config.SelectedModel{},
-		MCP:          config.MCPs{},
-		LSP:          config.LSPs{},
+		RecentModels: map[config.SelectedModelType][]config.SelectedModel{
+			config.SelectedModelTypeSmall: {
+				{Provider: "deepseek", Model: "deepseek-chat"},
+			},
+			config.SelectedModelTypeLarge: {
+				{Provider: "deepseek", Model: "deepseek-chat"},
+			},
+		},
+		MCP: config.MCPs{},
+		LSP: config.LSPs{},
 		Options: &config.Options{
-			TUI: &config.TUIOptions{},
+			TUI: &config.TUIOptions{
+				CompactMode: true,
+				Transparent: &transparent,
+			},
 		},
 		Agents: map[string]config.Agent{
 			config.AgentCoder: {
@@ -117,12 +144,21 @@ func newMockWorkspace() *mockWorkspace {
 
 var mockSession = session.Session{
 	ID:        "mock-session-id",
-	Title:     "title",
-	CreatedAt: time.Now().UnixMilli(),
-	UpdatedAt: time.Now().UnixMilli(),
+	Title:     "",
+	CreatedAt: time.Now().Unix(),
+	UpdatedAt: time.Now().Unix(),
 }
 
-func (w *mockWorkspace) CreateSession(_ context.Context, title string) (session.Session, error) {
+func (w *mockWorkspace) CreateSession(ctx context.Context, title string) (session.Session, error) {
+	if title == "" {
+		t, err := w.generateTitle(ctx)
+		if err == nil && t != "" {
+			title = t
+		}
+	}
+	if title == "" {
+		title = "Session"
+	}
 	mockSession.Title = title
 	return mockSession, nil
 }
@@ -170,20 +206,108 @@ func (w *mockWorkspace) ListAllUserMessages(_ context.Context) ([]message.Messag
 
 // -- Agent --
 
-func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string, _ ...message.Attachment) error {
+// resolveValue resolves $VAR and ${VAR} references from the environment.
+func resolveValue(v string) string {
+	if !strings.HasPrefix(v, "$") {
+		return v
+	}
+	name := strings.TrimPrefix(v, "$")
+	name = strings.Trim(name, "{}")
+	return os.Getenv(name)
+}
+
+// buildProvider reads the large model entry from the config, resolves
+// credentials, and creates the corresponding fantasy provider.  It returns
+// the provider and the model ID string to pass to
+// provider.LanguageModel(ctx, modelID).
+func (w *mockWorkspace) buildProvider(modelType config.SelectedModelType) (fantasy.Provider, string, error) {
+	modelCfg, ok := w.cfg.Models[modelType]
+	if !ok {
+		return nil, "", fmt.Errorf("no model configured for %q", modelType)
+	}
+
+	providerCfg, ok := w.cfg.Providers.Get(modelCfg.Provider)
+	if !ok {
+		return nil, "", fmt.Errorf("provider %q not found in config", modelCfg.Provider)
+	}
+
+	apiKey := resolveValue(providerCfg.APIKey)
+	baseURL := resolveValue(providerCfg.BaseURL)
+	switch providerCfg.Type {
+	case catwalk.TypeOpenAICompat, "":
+		p, err := openaicompat.New(
+			openaicompat.WithBaseURL(baseURL),
+			openaicompat.WithAPIKey(apiKey),
+		)
+		if err != nil {
+			return nil, "", fmt.Errorf("creating openai-compat provider: %w", err)
+		}
+		return p, modelCfg.Model, nil
+	case catwalk.TypeAnthropic:
+		p, err := anthropic.New(
+			anthropic.WithBaseURL(baseURL),
+			anthropic.WithAPIKey(apiKey),
+		)
+		if err != nil {
+			return nil, "", fmt.Errorf("creating anthropic provider: %w", err)
+		}
+		return p, modelCfg.Model, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported provider type %q in demo", providerCfg.Type)
+	}
+}
+
+func (w *mockWorkspace) generateTitle(ctx context.Context) (string, error) {
+	provider, modelID, err := w.buildProvider(config.SelectedModelTypeSmall)
+	if err != nil {
+		return "", err
+	}
+	llm, err := provider.LanguageModel(ctx, modelID)
+	if err != nil {
+		return "", err
+	}
+	stream, err := llm.Stream(ctx, fantasy.Call{
+		Prompt: []fantasy.Message{
+			{
+				Role:    fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{fantasy.TextPart{Text: "Generate a short session title under 5 words. Respond with only the title, no explanation or punctuation."}},
+			},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	for part := range stream {
+		if part.Type == fantasy.StreamPartTypeTextDelta {
+			sb.WriteString(part.Delta)
+		}
+	}
+	return strings.TrimSpace(sb.String()), nil
+}
+
+func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string, attachments ...message.Attachment) error {
 	// Load existing messages from previous turns.
 	w.mu.Lock()
 	existing := make([]message.Message, len(w.sessionMessages[sessionID]))
 	copy(existing, w.sessionMessages[sessionID])
 	w.mu.Unlock()
 
+	// Build user message parts including text attachments.
+	userParts := []message.ContentPart{message.TextContent{Text: content}}
+	for _, a := range attachments {
+		if a.IsText() {
+			userParts = append(userParts, message.TextContent{Text: string(a.Content)})
+		}
+	}
+
 	// Publish user message.
 	userMsg := message.Message{
 		ID:        uuid.New().String(),
 		SessionID: sessionID,
 		Role:      message.User,
-		Parts:     []message.ContentPart{message.TextContent{Text: content}},
-		CreatedAt: time.Now().UnixMilli(),
+		Parts:     userParts,
+		CreatedAt: time.Now().Unix(),
 	}
 	w.prog.Send(pubsub.Event[message.Message]{
 		Type:    pubsub.CreatedEvent,
@@ -195,12 +319,15 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 
 	// Publish an empty assistant message.
 	assistantID := uuid.New().String()
+	modelCfg := w.cfg.Models[config.SelectedModelTypeLarge]
 	assistantMsg := message.Message{
 		ID:        assistantID,
 		SessionID: sessionID,
 		Role:      message.Assistant,
 		Parts:     []message.ContentPart{},
-		CreatedAt: time.Now().UnixMilli(),
+		Provider:  modelCfg.Provider,
+		Model:     modelCfg.Model,
+		CreatedAt: time.Now().Unix(),
 	}
 	w.prog.Send(pubsub.Event[message.Message]{
 		Type:    pubsub.CreatedEvent,
@@ -215,21 +342,17 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 	fantasyMsgs = append(fantasyMsgs, fantasy.Message{
 		Role: fantasy.MessageRoleUser,
 		Content: []fantasy.MessagePart{
-			fantasy.TextPart{Text: content},
+			fantasy.TextPart{Text: message.PromptWithTextAttachments(content, attachments)},
 		},
 	})
 
-	// Build the DeepSeek provider and call the LLM.
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	provider, err := openaicompat.New(
-		openaicompat.WithBaseURL("https://api.deepseek.com/v1"),
-		openaicompat.WithAPIKey(apiKey),
-	)
+	// Build the provider from config and call the LLM.
+	provider, modelID, err := w.buildProvider(config.SelectedModelTypeLarge)
 	if err != nil {
-		return fmt.Errorf("creating deepseek provider: %w", err)
+		return err
 	}
 
-	llm, err := provider.LanguageModel(ctx, "deepseek-chat")
+	llm, err := provider.LanguageModel(ctx, modelID)
 	if err != nil {
 		return fmt.Errorf("getting language model: %w", err)
 	}
