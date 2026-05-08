@@ -21,11 +21,13 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/program"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	ui "github.com/charmbracelet/crush/internal/ui/model"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -96,6 +98,7 @@ func newMockConfig() *config.Config {
 
 type mockWorkspace struct {
 	cfg *config.Config
+	prog program.Program
 }
 
 func newMockWorkspace() *mockWorkspace {
@@ -154,7 +157,53 @@ func (w *mockWorkspace) ListAllUserMessages(_ context.Context) ([]message.Messag
 
 // -- Agent --
 
-func (w *mockWorkspace) AgentRun(_ context.Context, _, _ string, _ ...message.Attachment) error {
+func (w *mockWorkspace) AgentRun(_ context.Context, sessionID, content string, _ ...message.Attachment) error {
+	// Sleep 1 second to simulate latency.
+	time.Sleep(time.Second)
+
+	// Publish a user message.
+	w.prog.Send(pubsub.Event[message.Message]{
+		Type: pubsub.CreatedEvent,
+		Payload: message.Message{
+			ID:        uuid.New().String(),
+			SessionID: sessionID,
+			Role:      message.User,
+			Parts:     []message.ContentPart{message.TextContent{Text: content}},
+			CreatedAt: time.Now().UnixMilli(),
+		},
+	})
+
+	// Publish an empty assistant message (simulates PrepareStep).
+	assistantID := uuid.New().String()
+	assistantMsg := message.Message{
+		ID:        assistantID,
+		SessionID: sessionID,
+		Role:      message.Assistant,
+		Parts:     []message.ContentPart{},
+		CreatedAt: time.Now().UnixMilli(),
+	}
+	w.prog.Send(pubsub.Event[message.Message]{
+		Type:    pubsub.CreatedEvent,
+		Payload: assistantMsg,
+	})
+
+	// Stream back the content character by character.
+	for _, r := range content {
+		time.Sleep(15 * time.Millisecond)
+		assistantMsg.AppendContent(string(r))
+		w.prog.Send(pubsub.Event[message.Message]{
+			Type:    pubsub.UpdatedEvent,
+			Payload: assistantMsg,
+		})
+	}
+
+	// Mark as finished.
+	assistantMsg.AddFinish(message.FinishReasonEndTurn, "", "")
+	w.prog.Send(pubsub.Event[message.Message]{
+		Type:    pubsub.UpdatedEvent,
+		Payload: assistantMsg,
+	})
+
 	return nil
 }
 
@@ -299,6 +348,8 @@ func (w *mockWorkspace) DisableDockerMCP() error { return nil }
 
 // -- Events --
 
-func (w *mockWorkspace) Subscribe(_ program.Program) {}
+func (w *mockWorkspace) Subscribe(prog program.Program) {
+	w.prog = prog
+}
 
 func (w *mockWorkspace) Shutdown() {}
