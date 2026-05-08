@@ -3,7 +3,9 @@ package chat
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/message"
@@ -30,30 +32,24 @@ type AssistantMessageItem struct {
 
 	message           *message.Message
 	sty               *styles.Styles
-	anim              *anim.Anim
+	spinner           spinner.Model
 	thinkingExpanded  bool
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
 }
 
 // NewAssistantMessageItem creates a new AssistantMessageItem.
 func NewAssistantMessageItem(sty *styles.Styles, message *message.Message) MessageItem {
-	a := &AssistantMessageItem{
+	return &AssistantMessageItem{
 		highlightableMessageItem: defaultHighlighter(sty),
 		cachedMessageItem:        &cachedMessageItem{},
 		focusableMessageItem:     &focusableMessageItem{},
 		message:                  message,
 		sty:                      sty,
+		spinner: spinner.New(
+			spinner.WithSpinner(spinner.Dot),
+			spinner.WithStyle(lipgloss.NewStyle().Foreground(sty.WorkingLabelColor)),
+		),
 	}
-
-	a.anim = anim.New(anim.Settings{
-		ID:          a.ID(),
-		Size:        15,
-		GradColorA:  sty.WorkingGradFromColor,
-		GradColorB:  sty.WorkingGradToColor,
-		LabelColor:  sty.WorkingLabelColor,
-		CycleColors: true,
-	})
-	return a
 }
 
 // StartAnimation starts the assistant message animation if it should be spinning.
@@ -61,7 +57,14 @@ func (a *AssistantMessageItem) StartAnimation() tea.Cmd {
 	if !a.isSpinning() {
 		return nil
 	}
-	return a.anim.Start()
+	// Advance one frame to initialize, then schedule at the spinner's FPS.
+	a.spinner, _ = a.spinner.Update(spinner.TickMsg{
+		Time: time.Now(),
+		ID:   a.spinner.ID(),
+	})
+	return tea.Tick(a.spinner.Spinner.FPS, func(t time.Time) tea.Msg {
+		return anim.StepMsg{ID: a.ID()}
+	})
 }
 
 // Animate progresses the assistant message animation if it should be spinning.
@@ -69,7 +72,13 @@ func (a *AssistantMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 	if !a.isSpinning() {
 		return nil
 	}
-	return a.anim.Animate(msg)
+	a.spinner, _ = a.spinner.Update(spinner.TickMsg{
+		Time: time.Now(),
+		ID:   a.spinner.ID(),
+	})
+	return tea.Tick(a.spinner.Spinner.FPS, func(t time.Time) tea.Msg {
+		return anim.StepMsg{ID: a.ID()}
+	})
 }
 
 // ID implements MessageItem.
@@ -211,12 +220,7 @@ func (a *AssistantMessageItem) renderMarkdown(content string, width int) string 
 }
 
 func (a *AssistantMessageItem) renderSpinning() string {
-	if a.message.IsThinking() {
-		a.anim.SetLabel("Thinking")
-	} else if a.message.IsSummaryMessage {
-		a.anim.SetLabel("Summarizing")
-	}
-	return a.anim.Render()
+	return a.spinner.View()
 }
 
 // renderError renders an error message.
