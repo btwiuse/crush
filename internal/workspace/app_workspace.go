@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
+	"github.com/btwiuse/boba"
 	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
@@ -367,7 +367,7 @@ func (w *AppWorkspace) DisableDockerMCP() error {
 
 // -- Lifecycle --
 
-func (w *AppWorkspace) Subscribe(program *tea.Program) {
+func (w *AppWorkspace) Subscribe(program boba.Program) {
 	w.app.Subscribe(program)
 }
 
