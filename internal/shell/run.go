@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -114,7 +113,6 @@ func standardHandlers(blockFuncs []BlockFunc) []func(next interp.ExecHandlerFunc
 		blockHandler(blockFuncs),
 	}
 	if useGoCoreUtils {
-		handlers = append(handlers, coreutils.ExecHandler)
 	}
 	return handlers
 }
