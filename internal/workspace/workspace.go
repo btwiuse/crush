@@ -8,7 +8,6 @@ import (
 	"context"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/pkg/catwalk"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -17,6 +16,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/program"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -139,7 +139,7 @@ type Workspace interface {
 	DisableDockerMCP() error
 
 	// Events
-	Subscribe(program *tea.Program)
+	Subscribe(program program.Program)
 	Shutdown()
 }
 

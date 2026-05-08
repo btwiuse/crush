@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/btwiuse/boba"
 	tea "charm.land/bubbletea/v2"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -19,12 +20,12 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/program"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
 	ui "github.com/charmbracelet/crush/internal/ui/model"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/workspace"
-	uv "github.com/charmbracelet/ultraviolet"
 )
 
 func main() {
@@ -37,10 +38,8 @@ func main() {
 
 	model := ui.New(com, "", false)
 
-	var env uv.Environ = os.Environ()
-	program := tea.NewProgram(
+	program := boba.NewProgram(
 		model,
-		tea.WithEnvironment(env),
 		tea.WithFilter(ui.MouseEventFilter),
 	)
 
@@ -70,12 +69,12 @@ func newMockConfig() *config.Config {
 		Providers: providers,
 		Models: map[config.SelectedModelType]config.SelectedModel{
 			config.SelectedModelTypeLarge: {
-				Provider: "mock",
-				Model:    "mock-model",
+				Provider: "deepseek",
+				Model:    "deepseek-chat",
 			},
 			config.SelectedModelTypeSmall: {
-				Provider: "mock",
-				Model:    "mock-model-small",
+				Provider: "deepseek",
+				Model:    "deepseek-chat",
 			},
 		},
 		RecentModels: map[config.SelectedModelType][]config.SelectedModel{},
@@ -105,21 +104,24 @@ func newMockWorkspace() *mockWorkspace {
 
 // -- Sessions --
 
+var mockSession = session.Session{
+	ID:        "mock-session-id",
+	Title:     "title",
+	CreatedAt: time.Now().UnixMilli(),
+	UpdatedAt: time.Now().UnixMilli(),
+}
+
 func (w *mockWorkspace) CreateSession(_ context.Context, title string) (session.Session, error) {
-	return session.Session{
-		ID:        "mock-session-id",
-		Title:     title,
-		CreatedAt: time.Now().UnixMilli(),
-		UpdatedAt: time.Now().UnixMilli(),
-	}, nil
+	mockSession.Title = title
+	return mockSession, nil
 }
 
 func (w *mockWorkspace) GetSession(_ context.Context, _ string) (session.Session, error) {
-	return session.Session{}, nil
+	return mockSession, nil
 }
 
 func (w *mockWorkspace) ListSessions(_ context.Context) ([]session.Session, error) {
-	return nil, nil
+	return []session.Session{mockSession}, nil
 }
 
 func (w *mockWorkspace) SaveSession(_ context.Context, sess session.Session) (session.Session, error) {
@@ -166,7 +168,7 @@ func (w *mockWorkspace) AgentModel() workspace.AgentModel {
 	return workspace.AgentModel{}
 }
 
-func (w *mockWorkspace) AgentIsReady() bool { return false }
+func (w *mockWorkspace) AgentIsReady() bool { return true }
 
 func (w *mockWorkspace) AgentQueuedPrompts(_ string) int { return 0 }
 
@@ -297,6 +299,6 @@ func (w *mockWorkspace) DisableDockerMCP() error { return nil }
 
 // -- Events --
 
-func (w *mockWorkspace) Subscribe(_ *tea.Program) {}
+func (w *mockWorkspace) Subscribe(_ program.Program) {}
 
 func (w *mockWorkspace) Shutdown() {}

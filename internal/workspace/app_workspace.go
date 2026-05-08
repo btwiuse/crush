@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
@@ -17,6 +16,7 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/program"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -367,7 +367,7 @@ func (w *AppWorkspace) DisableDockerMCP() error {
 
 // -- Lifecycle --
 
-func (w *AppWorkspace) Subscribe(program *tea.Program) {
+func (w *AppWorkspace) Subscribe(program program.Program) {
 	w.app.Subscribe(program)
 }
 
