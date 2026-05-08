@@ -24,7 +24,6 @@ import (
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/permission"
-	"github.com/charmbracelet/crush/internal/program"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/ui/common"
@@ -102,7 +101,7 @@ func newMockConfig() *config.Config {
 
 type mockWorkspace struct {
 	cfg             *config.Config
-	prog            program.Program
+	prog            boba.Program
 	mu              sync.Mutex
 	sessionMessages map[string][]message.Message
 }
@@ -420,7 +419,7 @@ func (w *mockWorkspace) DisableDockerMCP() error { return nil }
 
 // -- Events --
 
-func (w *mockWorkspace) Subscribe(prog program.Program) {
+func (w *mockWorkspace) Subscribe(prog boba.Program) {
 	w.prog = prog
 }
 
