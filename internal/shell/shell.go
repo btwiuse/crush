@@ -21,7 +21,6 @@ import (
 	"sync"
 
 	"github.com/charmbracelet/x/exp/slice"
-	"mvdan.cc/sh/moreinterp/coreutils"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -330,7 +329,7 @@ func (s *Shell) execHandlers() []func(next interp.ExecHandlerFunc) interp.ExecHa
 		s.blockHandler(),
 	}
 	if useGoCoreUtils {
-		handlers = append(handlers, coreutils.ExecHandler)
+		// handlers = append(handlers, coreutils.ExecHandler)
 	}
 	return handlers
 }
