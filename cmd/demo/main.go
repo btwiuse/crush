@@ -130,23 +130,24 @@ type mockWorkspace struct {
 	cfg             *config.Config
 	prog            boba.Program
 	mu              sync.Mutex
+	sessions        map[string]session.Session
 	sessionMessages map[string][]message.Message
+	sessionSeq      int
 }
 
 func newMockWorkspace() *mockWorkspace {
 	return &mockWorkspace{
 		cfg:             newMockConfig(),
+		sessions:        make(map[string]session.Session),
 		sessionMessages: make(map[string][]message.Message),
 	}
 }
 
 // -- Sessions --
 
-var mockSession = session.Session{
-	ID:        "mock-session-id",
-	Title:     "",
-	CreatedAt: time.Now().Unix(),
-	UpdatedAt: time.Now().Unix(),
+func (w *mockWorkspace) newSessionID() string {
+	w.sessionSeq++
+	return fmt.Sprintf("mock-session-%d", w.sessionSeq)
 }
 
 func (w *mockWorkspace) CreateSession(ctx context.Context, title string) (session.Session, error) {
@@ -159,23 +160,53 @@ func (w *mockWorkspace) CreateSession(ctx context.Context, title string) (sessio
 	if title == "" {
 		title = "Session"
 	}
-	mockSession.Title = title
-	return mockSession, nil
-}
-
-func (w *mockWorkspace) GetSession(_ context.Context, _ string) (session.Session, error) {
-	return mockSession, nil
-}
-
-func (w *mockWorkspace) ListSessions(_ context.Context) ([]session.Session, error) {
-	return []session.Session{mockSession}, nil
-}
-
-func (w *mockWorkspace) SaveSession(_ context.Context, sess session.Session) (session.Session, error) {
+	now := time.Now().Unix()
+	sess := session.Session{
+		ID:        w.newSessionID(),
+		Title:     title,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	w.mu.Lock()
+	w.sessions[sess.ID] = sess
+	w.mu.Unlock()
 	return sess, nil
 }
 
-func (w *mockWorkspace) DeleteSession(_ context.Context, _ string) error { return nil }
+func (w *mockWorkspace) GetSession(_ context.Context, id string) (session.Session, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	sess, ok := w.sessions[id]
+	if !ok {
+		return session.Session{}, fmt.Errorf("session %q not found", id)
+	}
+	return sess, nil
+}
+
+func (w *mockWorkspace) ListSessions(_ context.Context) ([]session.Session, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	result := make([]session.Session, 0, len(w.sessions))
+	for _, s := range w.sessions {
+		result = append(result, s)
+	}
+	return result, nil
+}
+
+func (w *mockWorkspace) SaveSession(_ context.Context, sess session.Session) (session.Session, error) {
+	w.mu.Lock()
+	w.sessions[sess.ID] = sess
+	w.mu.Unlock()
+	return sess, nil
+}
+
+func (w *mockWorkspace) DeleteSession(_ context.Context, id string) error {
+	w.mu.Lock()
+	delete(w.sessions, id)
+	delete(w.sessionMessages, id)
+	w.mu.Unlock()
+	return nil
+}
 
 func (w *mockWorkspace) CreateAgentToolSessionID(messageID, toolCallID string) string {
 	return messageID + ":" + toolCallID
@@ -196,12 +227,31 @@ func (w *mockWorkspace) ListMessages(_ context.Context, sessionID string) ([]mes
 	return result, nil
 }
 
-func (w *mockWorkspace) ListUserMessages(_ context.Context, _ string) ([]message.Message, error) {
-	return nil, nil
+func (w *mockWorkspace) ListUserMessages(_ context.Context, sessionID string) ([]message.Message, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	msgs := w.sessionMessages[sessionID]
+	var result []message.Message
+	for _, m := range msgs {
+		if m.Role == message.User {
+			result = append(result, m)
+		}
+	}
+	return result, nil
 }
 
 func (w *mockWorkspace) ListAllUserMessages(_ context.Context) ([]message.Message, error) {
-	return nil, nil
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var result []message.Message
+	for _, msgs := range w.sessionMessages {
+		for _, m := range msgs {
+			if m.Role == message.User {
+				result = append(result, m)
+			}
+		}
+	}
+	return result, nil
 }
 
 // -- Agent --
@@ -373,6 +423,12 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 				Type:    pubsub.UpdatedEvent,
 				Payload: assistantMsg,
 			})
+		case fantasy.StreamPartTypeReasoningDelta:
+			assistantMsg.AppendReasoningContent(part.Delta)
+			w.prog.Send(pubsub.Event[message.Message]{
+				Type:    pubsub.UpdatedEvent,
+				Payload: assistantMsg,
+			})
 		case fantasy.StreamPartTypeError:
 			return fmt.Errorf("stream error: %w", part.Error)
 		case fantasy.StreamPartTypeFinish:
@@ -408,7 +464,15 @@ func (w *mockWorkspace) AgentIsBusy() bool { return false }
 func (w *mockWorkspace) AgentIsSessionBusy(_ string) bool { return false }
 
 func (w *mockWorkspace) AgentModel() workspace.AgentModel {
-	return workspace.AgentModel{}
+	modelCfg := w.cfg.Models[config.SelectedModelTypeLarge]
+	catwalkCfg := w.cfg.GetModel(modelCfg.Provider, modelCfg.Model)
+	if catwalkCfg == nil {
+		return workspace.AgentModel{}
+	}
+	return workspace.AgentModel{
+		CatwalkCfg: *catwalkCfg,
+		ModelCfg:   modelCfg,
+	}
 }
 
 func (w *mockWorkspace) AgentIsReady() bool { return true }
@@ -490,17 +554,42 @@ func (w *mockWorkspace) Resolver() config.VariableResolver {
 
 // -- Config mutations --
 
-func (w *mockWorkspace) UpdatePreferredModel(_ config.Scope, _ config.SelectedModelType, _ config.SelectedModel) error {
+func (w *mockWorkspace) UpdatePreferredModel(_ config.Scope, modelType config.SelectedModelType, model config.SelectedModel) error {
+	w.mu.Lock()
+	w.cfg.Models[modelType] = model
+	w.cfg.RecentModels[modelType] = append([]config.SelectedModel{model}, w.cfg.RecentModels[modelType]...)
+	w.mu.Unlock()
 	return nil
 }
 
-func (w *mockWorkspace) SetCompactMode(_ config.Scope, _ bool) error { return nil }
+func (w *mockWorkspace) SetCompactMode(_ config.Scope, enabled bool) error {
+	if w.cfg.Options != nil && w.cfg.Options.TUI != nil {
+		w.mu.Lock()
+		w.cfg.Options.TUI.CompactMode = enabled
+		w.mu.Unlock()
+	}
+	return nil
+}
 
-func (w *mockWorkspace) SetProviderAPIKey(_ config.Scope, _ string, _ any) error { return nil }
+func (w *mockWorkspace) SetProviderAPIKey(_ config.Scope, providerID string, apiKey any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if pc, ok := w.cfg.Providers.Get(providerID); ok {
+		keyStr, _ := apiKey.(string)
+		pc.APIKey = keyStr
+		w.cfg.Providers.Set(providerID, pc)
+	}
+	return nil
+}
 
-func (w *mockWorkspace) SetConfigField(_ config.Scope, _ string, _ any) error { return nil }
+func (w *mockWorkspace) SetConfigField(_ config.Scope, _ string, _ any) error {
+	// Generic JSON-path field mutations are not needed for the demo.
+	return nil
+}
 
-func (w *mockWorkspace) RemoveConfigField(_ config.Scope, _ string) error { return nil }
+func (w *mockWorkspace) RemoveConfigField(_ config.Scope, _ string) error {
+	return nil
+}
 
 func (w *mockWorkspace) ImportCopilot() (*oauth.Token, bool) { return nil, false }
 
