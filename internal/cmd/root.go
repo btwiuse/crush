@@ -390,8 +390,8 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 // ensureServer auto-starts a detached server if the socket file does not
 // exist. When the socket exists, it verifies that the running server
 // version matches the client; on mismatch it shuts down the old server
-// and starts a fresh one. For TCP connections, the server is assumed to
-// be already running remotely and is validated via a health check.
+// and starts a fresh one. For TCP/HTTP/HTTPS connections, the server is
+// assumed to be already running remotely and is validated via a health check.
 func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
 	switch hostURL.Scheme {
 	case "unix", "npipe":
@@ -426,10 +426,10 @@ func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize crush server: %v", err)
 		}
-	case "tcp":
-		// For TCP connections, the server is assumed to be running remotely.
+	case "tcp", "http", "https":
+		// For remote connections the server is assumed to be already running.
 		// Validate reachability by performing a health check.
-		if err := validateTCPServer(cmd, hostURL); err != nil {
+		if err := validateRemoteServer(cmd, hostURL); err != nil {
 			return err
 		}
 	}
@@ -437,15 +437,15 @@ func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
 	return nil
 }
 
-// validateTCPServer checks that a remote TCP server is reachable by issuing
-// a health check request.
-func validateTCPServer(cmd *cobra.Command, hostURL *url.URL) error {
+// validateRemoteServer checks that a remote server is reachable by issuing a
+// health check request.
+func validateRemoteServer(cmd *cobra.Command, hostURL *url.URL) error {
 	c, err := client.NewClient("", hostURL.Scheme, hostURL.Host)
 	if err != nil {
-		return fmt.Errorf("failed to create client for TCP server: %v", err)
+		return fmt.Errorf("failed to create client for remote server: %v", err)
 	}
 	if err := c.Health(cmd.Context()); err != nil {
-		return fmt.Errorf("TCP server at %s is not reachable: %v", hostURL.Host, err)
+		return fmt.Errorf("remote server at %s is not reachable: %v", hostURL.Host, err)
 	}
 	return nil
 }

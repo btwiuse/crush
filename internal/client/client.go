@@ -46,7 +46,14 @@ func NewClient(path, network, address string) (*Client, error) {
 	c.addr = address
 	p := &http.Protocols{}
 	p.SetHTTP1(true)
-	p.SetUnencryptedHTTP2(true)
+	switch network {
+	case "https":
+		// Enable encrypted HTTP/2 for TLS connections.
+		p.SetHTTP2(true)
+	default:
+		// Use unencrypted HTTP/2 (h2c) for plain TCP-based connections.
+		p.SetUnencryptedHTTP2(true)
+	}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Protocols = p
 	tr.DialContext = c.dialer
@@ -183,6 +190,9 @@ func (c *Client) buildReq(ctx context.Context, method, url string, body io.Reade
 	}
 
 	r.URL.Scheme = "http"
+	if c.network == "https" {
+		r.URL.Scheme = "https"
+	}
 	r.URL.Host = c.addr
 	if c.network == "npipe" || c.network == "unix" {
 		r.Host = DummyHost

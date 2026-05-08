@@ -28,10 +28,11 @@ func ParseHostURL(host string) (*url.URL, error) {
 	}
 
 	var basePath string
-	if proto == "tcp" {
-		parsed, err := url.Parse("tcp://" + addr)
+	switch proto {
+	case "tcp", "http", "https":
+		parsed, err := url.Parse(proto + "://" + addr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid tcp address: %v", err)
+			return nil, fmt.Errorf("invalid %s address: %v", proto, err)
 		}
 		addr = parsed.Host
 		basePath = parsed.Path
