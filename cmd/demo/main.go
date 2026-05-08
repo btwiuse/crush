@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"charm.land/fantasy"
@@ -100,12 +101,17 @@ func newMockConfig() *config.Config {
 // ── mock workspace ───────────────────────────────────────────────────────────
 
 type mockWorkspace struct {
-	cfg *config.Config
-	prog program.Program
+	cfg             *config.Config
+	prog            program.Program
+	mu              sync.Mutex
+	sessionMessages map[string][]message.Message
 }
 
 func newMockWorkspace() *mockWorkspace {
-	return &mockWorkspace{cfg: newMockConfig()}
+	return &mockWorkspace{
+		cfg:             newMockConfig(),
+		sessionMessages: make(map[string][]message.Message),
+	}
 }
 
 // -- Sessions --
@@ -146,8 +152,13 @@ func (w *mockWorkspace) ParseAgentToolSessionID(sessionID string) (string, strin
 
 // -- Messages --
 
-func (w *mockWorkspace) ListMessages(_ context.Context, _ string) ([]message.Message, error) {
-	return nil, nil
+func (w *mockWorkspace) ListMessages(_ context.Context, sessionID string) ([]message.Message, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	msgs := w.sessionMessages[sessionID]
+	result := make([]message.Message, len(msgs))
+	copy(result, msgs)
+	return result, nil
 }
 
 func (w *mockWorkspace) ListUserMessages(_ context.Context, _ string) ([]message.Message, error) {
@@ -161,19 +172,29 @@ func (w *mockWorkspace) ListAllUserMessages(_ context.Context) ([]message.Messag
 // -- Agent --
 
 func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string, _ ...message.Attachment) error {
-	// Publish a user message.
-	w.prog.Send(pubsub.Event[message.Message]{
-		Type: pubsub.CreatedEvent,
-		Payload: message.Message{
-			ID:        uuid.New().String(),
-			SessionID: sessionID,
-			Role:      message.User,
-			Parts:     []message.ContentPart{message.TextContent{Text: content}},
-			CreatedAt: time.Now().UnixMilli(),
-		},
-	})
+	// Load existing messages from previous turns.
+	w.mu.Lock()
+	existing := make([]message.Message, len(w.sessionMessages[sessionID]))
+	copy(existing, w.sessionMessages[sessionID])
+	w.mu.Unlock()
 
-	// Publish an empty assistant message (simulates PrepareStep).
+	// Publish user message.
+	userMsg := message.Message{
+		ID:        uuid.New().String(),
+		SessionID: sessionID,
+		Role:      message.User,
+		Parts:     []message.ContentPart{message.TextContent{Text: content}},
+		CreatedAt: time.Now().UnixMilli(),
+	}
+	w.prog.Send(pubsub.Event[message.Message]{
+		Type:    pubsub.CreatedEvent,
+		Payload: userMsg,
+	})
+	w.mu.Lock()
+	w.sessionMessages[sessionID] = append(w.sessionMessages[sessionID], userMsg)
+	w.mu.Unlock()
+
+	// Publish an empty assistant message.
 	assistantID := uuid.New().String()
 	assistantMsg := message.Message{
 		ID:        assistantID,
@@ -185,6 +206,18 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 	w.prog.Send(pubsub.Event[message.Message]{
 		Type:    pubsub.CreatedEvent,
 		Payload: assistantMsg,
+	})
+
+	// Build full fantasy prompt: previous turns + current user message.
+	var fantasyMsgs []fantasy.Message
+	for _, m := range existing {
+		fantasyMsgs = append(fantasyMsgs, m.ToAIMessage()...)
+	}
+	fantasyMsgs = append(fantasyMsgs, fantasy.Message{
+		Role: fantasy.MessageRoleUser,
+		Content: []fantasy.MessagePart{
+			fantasy.TextPart{Text: content},
+		},
 	})
 
 	// Build the DeepSeek provider and call the LLM.
@@ -203,14 +236,7 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 	}
 
 	stream, err := llm.Stream(ctx, fantasy.Call{
-		Prompt: fantasy.Prompt{
-			{
-				Role: fantasy.MessageRoleUser,
-				Content: []fantasy.MessagePart{
-					fantasy.TextPart{Text: content},
-				},
-			},
-		},
+		Prompt: fantasyMsgs,
 	})
 	if err != nil {
 		return fmt.Errorf("starting LLM stream: %w", err)
@@ -244,6 +270,11 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 			Payload: assistantMsg,
 		})
 	}
+
+	// Save the assistant message for future turns.
+	w.mu.Lock()
+	w.sessionMessages[sessionID] = append(w.sessionMessages[sessionID], assistantMsg)
+	w.mu.Unlock()
 
 	return nil
 }
