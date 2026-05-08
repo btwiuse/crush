@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/btwiuse/boba"
 	tea "charm.land/bubbletea/v2"
 	fang "charm.land/fang/v2"
 	"charm.land/lipgloss/v2"
@@ -126,7 +127,7 @@ crush --continue
 		model := ui.New(com, sessionID, continueLast)
 
 		var env uv.Environ = os.Environ()
-		program := tea.NewProgram(
+		program := boba.NewProgram(
 			model,
 			tea.WithEnvironment(env),
 			tea.WithContext(cmd.Context()),

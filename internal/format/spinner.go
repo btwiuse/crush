@@ -7,6 +7,7 @@ import (
 	"os"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/btwiuse/boba"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -14,7 +15,7 @@ import (
 // Spinner wraps the bubbles spinner for non-interactive mode
 type Spinner struct {
 	done chan struct{}
-	prog *tea.Program
+	prog boba.Program
 }
 
 type model struct {
@@ -48,7 +49,7 @@ func NewSpinner(ctx context.Context, cancel context.CancelFunc, animSettings ani
 		cancel: cancel,
 	}
 
-	p := tea.NewProgram(m, tea.WithOutput(os.Stderr), tea.WithContext(ctx))
+	p := boba.NewProgram(m, tea.WithOutput(os.Stderr), tea.WithContext(ctx))
 
 	return &Spinner{
 		prog: p,
