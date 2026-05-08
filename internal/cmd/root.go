@@ -425,6 +425,28 @@ func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize crush server: %v", err)
 		}
+	case "tcp":
+		if err := validateTCPServer(cmd.Context(), hostURL); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported server host protocol: %s", hostURL.Scheme)
+	}
+
+	return nil
+}
+
+func validateTCPServer(ctx context.Context, hostURL *url.URL) error {
+	c, err := client.NewClient("", hostURL.Scheme, hostURL.Host)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := c.Health(ctx); err != nil {
+		return fmt.Errorf("failed to connect to remote crush server %q: %w", hostURL.Host, err)
 	}
 
 	return nil
