@@ -127,13 +127,22 @@ func newMockConfig() *config.Config {
 // ── mock workspace ───────────────────────────────────────────────────────────
 
 type mockWorkspace struct {
-	cfg                   *config.Config
-	prog                  boba.Program
-	mu                    sync.Mutex
-	sessions              map[string]session.Session
-	sessionMessages       map[string][]message.Message
-	sessionSeq            int
+	cfg                    *config.Config
+	prog                   boba.Program
+	mu                     sync.Mutex
+	sessions               map[string]session.Session
+	sessionMessages        map[string][]message.Message
+	sessionSeq             int
 	skipPermissionRequests bool
+	agentCancel            context.CancelFunc
+	agentBusy              bool
+	agentBusySessionID     string
+	agentPromptQueue       []agentQueuedPrompt
+}
+
+type agentQueuedPrompt struct {
+	sessionID string
+	content   string
 }
 
 func newMockWorkspace() *mockWorkspace {
@@ -340,6 +349,25 @@ func (w *mockWorkspace) generateTitle(ctx context.Context, userPrompt string) (s
 }
 
 func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string, attachments ...message.Attachment) error {
+	// Mark agent as busy.
+	w.mu.Lock()
+	w.agentBusy = true
+	w.agentBusySessionID = sessionID
+	runCtx, runCancel := context.WithCancel(ctx)
+	w.agentCancel = runCancel
+	w.mu.Unlock()
+
+	busy := true
+	defer func() {
+		if busy {
+			w.mu.Lock()
+			w.agentBusy = false
+			w.agentBusySessionID = ""
+			w.agentCancel = nil
+			w.mu.Unlock()
+		}
+	}()
+
 	// Load existing messages from previous turns.
 	w.mu.Lock()
 	existing := make([]message.Message, len(w.sessionMessages[sessionID]))
@@ -406,12 +434,12 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 		return err
 	}
 
-	llm, err := provider.LanguageModel(ctx, modelID)
+	llm, err := provider.LanguageModel(runCtx, modelID)
 	if err != nil {
 		return fmt.Errorf("getting language model: %w", err)
 	}
 
-	stream, err := llm.Stream(ctx, fantasy.Call{
+	stream, err := llm.Stream(runCtx, fantasy.Call{
 		Prompt: fantasyMsgs,
 	})
 	if err != nil {
@@ -419,7 +447,15 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 	}
 
 	sentFinish := false
+	cancelled := false
+streamLoop:
 	for part := range stream {
+		select {
+		case <-runCtx.Done():
+			cancelled = true
+			break streamLoop
+		default:
+		}
 		switch part.Type {
 		case fantasy.StreamPartTypeTextDelta:
 			assistantMsg.AppendContent(part.Delta)
@@ -427,12 +463,35 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 				Type:    pubsub.UpdatedEvent,
 				Payload: assistantMsg,
 			})
+		case fantasy.StreamPartTypeTextStart:
+			// Text section starting; no action needed, deltas will follow.
+		case fantasy.StreamPartTypeTextEnd:
+			// Text section complete; no action needed.
+		case fantasy.StreamPartTypeReasoningStart:
+			// First reasoning delta will create the part; nothing to do here.
 		case fantasy.StreamPartTypeReasoningDelta:
 			assistantMsg.AppendReasoningContent(part.Delta)
 			w.prog.Send(pubsub.Event[message.Message]{
 				Type:    pubsub.UpdatedEvent,
 				Payload: assistantMsg,
 			})
+		case fantasy.StreamPartTypeReasoningEnd:
+			assistantMsg.FinishThinking()
+			w.prog.Send(pubsub.Event[message.Message]{
+				Type:    pubsub.UpdatedEvent,
+				Payload: assistantMsg,
+			})
+		case fantasy.StreamPartTypeSource:
+			// Source citations emitted by some providers; forward as content.
+			if part.Delta != "" {
+				assistantMsg.AppendContent(part.Delta)
+				w.prog.Send(pubsub.Event[message.Message]{
+					Type:    pubsub.UpdatedEvent,
+					Payload: assistantMsg,
+				})
+			}
+		case fantasy.StreamPartTypeWarnings:
+			// Provider warnings — could surface in UI, logging is sufficient.
 		case fantasy.StreamPartTypeError:
 			return fmt.Errorf("stream error: %w", part.Error)
 		case fantasy.StreamPartTypeFinish:
@@ -445,7 +504,13 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 		}
 	}
 
-	if !sentFinish {
+	if cancelled {
+		assistantMsg.AddFinish(message.FinishReasonCanceled, "", "")
+		w.prog.Send(pubsub.Event[message.Message]{
+			Type:    pubsub.UpdatedEvent,
+			Payload: assistantMsg,
+		})
+	} else if !sentFinish {
 		assistantMsg.AddFinish(message.FinishReasonEndTurn, "", "")
 		w.prog.Send(pubsub.Event[message.Message]{
 			Type:    pubsub.UpdatedEvent,
@@ -459,7 +524,7 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 	w.mu.Unlock()
 
 	// Generate a title from the first user message.
-	if isFirstTurn {
+	if isFirstTurn && !cancelled {
 		title, err := w.generateTitle(ctx, content)
 		if err == nil && title != "" {
 			w.mu.Lock()
@@ -471,14 +536,43 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 		}
 	}
 
+	// Process next queued prompt.
+	w.mu.Lock()
+	w.agentBusy = false
+	w.agentCancel = nil
+	if len(w.agentPromptQueue) > 0 {
+		next := w.agentPromptQueue[0]
+		w.agentPromptQueue = w.agentPromptQueue[1:]
+		w.mu.Unlock()
+		return w.AgentRun(ctx, next.sessionID, next.content)
+	}
+	w.agentBusySessionID = ""
+	busy = false
+	w.mu.Unlock()
+
 	return nil
 }
 
-func (w *mockWorkspace) AgentCancel(_ string) {}
+func (w *mockWorkspace) AgentCancel(_ string) {
+	w.mu.Lock()
+	cancel := w.agentCancel
+	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
 
-func (w *mockWorkspace) AgentIsBusy() bool { return false }
+func (w *mockWorkspace) AgentIsBusy() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.agentBusy
+}
 
-func (w *mockWorkspace) AgentIsSessionBusy(_ string) bool { return false }
+func (w *mockWorkspace) AgentIsSessionBusy(sessionID string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.agentBusy && w.agentBusySessionID == sessionID
+}
 
 func (w *mockWorkspace) AgentModel() workspace.AgentModel {
 	modelCfg := w.cfg.Models[config.SelectedModelTypeLarge]
@@ -494,20 +588,108 @@ func (w *mockWorkspace) AgentModel() workspace.AgentModel {
 
 func (w *mockWorkspace) AgentIsReady() bool { return true }
 
-func (w *mockWorkspace) AgentQueuedPrompts(_ string) int { return 0 }
+func (w *mockWorkspace) AgentQueuedPrompts(sessionID string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	count := 0
+	for _, p := range w.agentPromptQueue {
+		if p.sessionID == sessionID {
+			count++
+		}
+	}
+	return count
+}
 
-func (w *mockWorkspace) AgentQueuedPromptsList(_ string) []string { return nil }
+func (w *mockWorkspace) AgentQueuedPromptsList(sessionID string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var result []string
+	for _, p := range w.agentPromptQueue {
+		if p.sessionID == sessionID {
+			result = append(result, p.content)
+		}
+	}
+	return result
+}
 
-func (w *mockWorkspace) AgentClearQueue(_ string) {}
+func (w *mockWorkspace) AgentClearQueue(sessionID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var filtered []agentQueuedPrompt
+	for _, p := range w.agentPromptQueue {
+		if p.sessionID != sessionID {
+			filtered = append(filtered, p)
+		}
+	}
+	w.agentPromptQueue = filtered
+	w.mu.Unlock()
+}
 
-func (w *mockWorkspace) AgentSummarize(_ context.Context, _ string) error { return nil }
+func (w *mockWorkspace) AgentSummarize(ctx context.Context, sessionID string) error {
+	w.mu.Lock()
+	msgs := make([]message.Message, len(w.sessionMessages[sessionID]))
+	copy(msgs, w.sessionMessages[sessionID])
+	w.mu.Unlock()
+
+	if len(msgs) < 2 {
+		return nil
+	}
+
+	var sb strings.Builder
+	for _, m := range msgs {
+		role := "user"
+		if m.Role == message.Assistant {
+			role = "assistant"
+		}
+		fmt.Fprintf(&sb, "%s: %s\n", role, m.Content().Text)
+	}
+
+	provider, modelID, err := w.buildProvider(config.SelectedModelTypeSmall)
+	if err != nil {
+		return err
+	}
+	llm, err := provider.LanguageModel(ctx, modelID)
+	if err != nil {
+		return err
+	}
+	stream, err := llm.Stream(ctx, fantasy.Call{
+		Prompt: []fantasy.Message{
+			{
+				Role:    fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{fantasy.TextPart{Text: fmt.Sprintf("Summarize this conversation in 2-3 sentences:\n\n%s", sb.String())}},
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	var summaryText strings.Builder
+	for part := range stream {
+		if part.Type == fantasy.StreamPartTypeTextDelta {
+			summaryText.WriteString(part.Delta)
+		}
+	}
+	summary := strings.TrimSpace(summaryText.String())
+
+	w.mu.Lock()
+	if s, ok := w.sessions[sessionID]; ok {
+		s.Title = summary
+		w.sessions[sessionID] = s
+	}
+	w.mu.Unlock()
+	return nil
+}
 
 func (w *mockWorkspace) UpdateAgentModel(_ context.Context) error { return nil }
 
 func (w *mockWorkspace) InitCoderAgent(_ context.Context) error { return nil }
 
 func (w *mockWorkspace) GetDefaultSmallModel(_ string) config.SelectedModel {
-	return config.SelectedModel{}
+	model, ok := w.cfg.Models[config.SelectedModelTypeSmall]
+	if !ok {
+		return config.SelectedModel{}
+	}
+	return model
 }
 
 // -- Permissions --
@@ -622,7 +804,15 @@ func (w *mockWorkspace) SetConfigField(_ config.Scope, key string, value any) er
 	return nil
 }
 
-func (w *mockWorkspace) RemoveConfigField(_ config.Scope, _ string) error {
+func (w *mockWorkspace) RemoveConfigField(_ config.Scope, key string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	switch key {
+	case "options.tui.transparent":
+		if w.cfg.Options != nil && w.cfg.Options.TUI != nil {
+			w.cfg.Options.TUI.Transparent = nil
+		}
+	}
 	return nil
 }
 
