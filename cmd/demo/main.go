@@ -127,12 +127,13 @@ func newMockConfig() *config.Config {
 // ── mock workspace ───────────────────────────────────────────────────────────
 
 type mockWorkspace struct {
-	cfg             *config.Config
-	prog            boba.Program
-	mu              sync.Mutex
-	sessions        map[string]session.Session
-	sessionMessages map[string][]message.Message
-	sessionSeq      int
+	cfg                   *config.Config
+	prog                  boba.Program
+	mu                    sync.Mutex
+	sessions              map[string]session.Session
+	sessionMessages       map[string][]message.Message
+	sessionSeq            int
+	skipPermissionRequests bool
 }
 
 func newMockWorkspace() *mockWorkspace {
@@ -151,12 +152,6 @@ func (w *mockWorkspace) newSessionID() string {
 }
 
 func (w *mockWorkspace) CreateSession(ctx context.Context, title string) (session.Session, error) {
-	if title == "" {
-		t, err := w.generateTitle(ctx)
-		if err == nil && t != "" {
-			title = t
-		}
-	}
 	if title == "" {
 		title = "Session"
 	}
@@ -307,7 +302,10 @@ func (w *mockWorkspace) buildProvider(modelType config.SelectedModelType) (fanta
 	}
 }
 
-func (w *mockWorkspace) generateTitle(ctx context.Context) (string, error) {
+func (w *mockWorkspace) generateTitle(ctx context.Context, userPrompt string) (string, error) {
+	if userPrompt == "" {
+		return "", nil
+	}
 	provider, modelID, err := w.buildProvider(config.SelectedModelTypeSmall)
 	if err != nil {
 		return "", err
@@ -320,7 +318,7 @@ func (w *mockWorkspace) generateTitle(ctx context.Context) (string, error) {
 		Prompt: []fantasy.Message{
 			{
 				Role:    fantasy.MessageRoleUser,
-				Content: []fantasy.MessagePart{fantasy.TextPart{Text: "Generate a short session title under 5 words. Respond with only the title, no explanation or punctuation."}},
+				Content: []fantasy.MessagePart{fantasy.TextPart{Text: fmt.Sprintf("Generate a concise title for the following content:\n\n%s", userPrompt)}},
 			},
 		},
 	})
@@ -333,13 +331,19 @@ func (w *mockWorkspace) generateTitle(ctx context.Context) (string, error) {
 			sb.WriteString(part.Delta)
 		}
 	}
-	return strings.TrimSpace(sb.String()), nil
+	title := strings.TrimSpace(sb.String())
+	title = strings.Trim(title, `"'`)
+	if len(title) > 100 {
+		title = title[:100]
+	}
+	return title, nil
 }
 
 func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string, attachments ...message.Attachment) error {
 	// Load existing messages from previous turns.
 	w.mu.Lock()
 	existing := make([]message.Message, len(w.sessionMessages[sessionID]))
+	isFirstTurn := len(existing) == 0
 	copy(existing, w.sessionMessages[sessionID])
 	w.mu.Unlock()
 
@@ -454,6 +458,19 @@ func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string,
 	w.sessionMessages[sessionID] = append(w.sessionMessages[sessionID], assistantMsg)
 	w.mu.Unlock()
 
+	// Generate a title from the first user message.
+	if isFirstTurn {
+		title, err := w.generateTitle(ctx, content)
+		if err == nil && title != "" {
+			w.mu.Lock()
+			if s, ok := w.sessions[sessionID]; ok {
+				s.Title = title
+				w.sessions[sessionID] = s
+			}
+			w.mu.Unlock()
+		}
+	}
+
 	return nil
 }
 
@@ -501,9 +518,17 @@ func (w *mockWorkspace) PermissionGrantPersistent(_ permission.PermissionRequest
 
 func (w *mockWorkspace) PermissionDeny(_ permission.PermissionRequest) {}
 
-func (w *mockWorkspace) PermissionSkipRequests() bool { return false }
+func (w *mockWorkspace) PermissionSkipRequests() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.skipPermissionRequests
+}
 
-func (w *mockWorkspace) PermissionSetSkipRequests(_ bool) {}
+func (w *mockWorkspace) PermissionSetSkipRequests(skip bool) {
+	w.mu.Lock()
+	w.skipPermissionRequests = skip
+	w.mu.Unlock()
+}
 
 // -- FileTracker --
 
@@ -582,8 +607,18 @@ func (w *mockWorkspace) SetProviderAPIKey(_ config.Scope, providerID string, api
 	return nil
 }
 
-func (w *mockWorkspace) SetConfigField(_ config.Scope, _ string, _ any) error {
-	// Generic JSON-path field mutations are not needed for the demo.
+func (w *mockWorkspace) SetConfigField(_ config.Scope, key string, value any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	switch key {
+	case "options.tui.transparent":
+		if w.cfg.Options != nil && w.cfg.Options.TUI != nil {
+			v, ok := value.(bool)
+			if ok {
+				w.cfg.Options.TUI.Transparent = &v
+			}
+		}
+	}
 	return nil
 }
 
