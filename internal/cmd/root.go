@@ -46,6 +46,8 @@ import (
 
 var clientHost string
 
+const tcpHealthCheckTimeout = 5 * time.Second
+
 func init() {
 	rootCmd.PersistentFlags().StringP("cwd", "c", "", "Current working directory")
 	rootCmd.PersistentFlags().StringP("data-dir", "D", "", "Custom crush data directory")
@@ -430,7 +432,7 @@ func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
 			return err
 		}
 	default:
-		return fmt.Errorf("unsupported server host protocol: %s", hostURL.Scheme)
+		return fmt.Errorf("unsupported server protocol: %s", hostURL.Scheme)
 	}
 
 	return nil
@@ -442,7 +444,7 @@ func validateTCPServer(ctx context.Context, hostURL *url.URL) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, tcpHealthCheckTimeout)
 	defer cancel()
 
 	if err := c.Health(ctx); err != nil {
