@@ -1,15 +1,18 @@
 // Package main is a minimal standalone demo of the Crush TUI.
 //
-// It stubs out all file and network access with mock data, removes all
-// argv flag parsing, and launches the interactive TUI directly so the
-// UI can be exercised without a real LLM provider or database.
+// It stubs out file access and other backend services with mock data
+// but calls the configured LLM provider (deepseek) for real model
+// responses for a more interactive demo experience.
 package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
+	"charm.land/fantasy"
+	"charm.land/fantasy/providers/openaicompat"
 	"github.com/btwiuse/boba"
 	tea "charm.land/bubbletea/v2"
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
@@ -157,10 +160,7 @@ func (w *mockWorkspace) ListAllUserMessages(_ context.Context) ([]message.Messag
 
 // -- Agent --
 
-func (w *mockWorkspace) AgentRun(_ context.Context, sessionID, content string, _ ...message.Attachment) error {
-	// Sleep 1 second to simulate latency.
-	time.Sleep(time.Second)
-
+func (w *mockWorkspace) AgentRun(ctx context.Context, sessionID, content string, _ ...message.Attachment) error {
 	// Publish a user message.
 	w.prog.Send(pubsub.Event[message.Message]{
 		Type: pubsub.CreatedEvent,
@@ -187,22 +187,63 @@ func (w *mockWorkspace) AgentRun(_ context.Context, sessionID, content string, _
 		Payload: assistantMsg,
 	})
 
-	// Stream back the content character by character.
-	for _, r := range content {
-		time.Sleep(15 * time.Millisecond)
-		assistantMsg.AppendContent(string(r))
+	// Build the DeepSeek provider and call the LLM.
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
+	provider, err := openaicompat.New(
+		openaicompat.WithBaseURL("https://api.deepseek.com/v1"),
+		openaicompat.WithAPIKey(apiKey),
+	)
+	if err != nil {
+		return fmt.Errorf("creating deepseek provider: %w", err)
+	}
+
+	llm, err := provider.LanguageModel(ctx, "deepseek-chat")
+	if err != nil {
+		return fmt.Errorf("getting language model: %w", err)
+	}
+
+	stream, err := llm.Stream(ctx, fantasy.Call{
+		Prompt: fantasy.Prompt{
+			{
+				Role: fantasy.MessageRoleUser,
+				Content: []fantasy.MessagePart{
+					fantasy.TextPart{Text: content},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("starting LLM stream: %w", err)
+	}
+
+	sentFinish := false
+	for part := range stream {
+		switch part.Type {
+		case fantasy.StreamPartTypeTextDelta:
+			assistantMsg.AppendContent(part.Delta)
+			w.prog.Send(pubsub.Event[message.Message]{
+				Type:    pubsub.UpdatedEvent,
+				Payload: assistantMsg,
+			})
+		case fantasy.StreamPartTypeError:
+			return fmt.Errorf("stream error: %w", part.Error)
+		case fantasy.StreamPartTypeFinish:
+			sentFinish = true
+			assistantMsg.AddFinish(message.FinishReasonEndTurn, "", "")
+			w.prog.Send(pubsub.Event[message.Message]{
+				Type:    pubsub.UpdatedEvent,
+				Payload: assistantMsg,
+			})
+		}
+	}
+
+	if !sentFinish {
+		assistantMsg.AddFinish(message.FinishReasonEndTurn, "", "")
 		w.prog.Send(pubsub.Event[message.Message]{
 			Type:    pubsub.UpdatedEvent,
 			Payload: assistantMsg,
 		})
 	}
-
-	// Mark as finished.
-	assistantMsg.AddFinish(message.FinishReasonEndTurn, "", "")
-	w.prog.Send(pubsub.Event[message.Message]{
-		Type:    pubsub.UpdatedEvent,
-		Payload: assistantMsg,
-	})
 
 	return nil
 }
