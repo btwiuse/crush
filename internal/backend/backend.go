@@ -153,11 +153,6 @@ func (b *Backend) DeleteWorkspace(id string) {
 		ws.Shutdown()
 	}
 	b.workspaces.Del(id)
-
-	if b.workspaces.Len() == 0 && b.shutdownFn != nil {
-		slog.Info("Last workspace removed, shutting down server...")
-		b.shutdownFn()
-	}
 }
 
 // GetWorkspaceProto returns the proto representation of a workspace.
