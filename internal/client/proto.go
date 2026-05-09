@@ -321,7 +321,65 @@ func (c *Client) GetAgentInfo(ctx context.Context, id string) (*proto.AgentInfo,
 	return &info, nil
 }
 
-// UpdateAgent triggers an agent model update on the server.
+// SubscribeAgentInfo subscribes to agent info updates via Server-Sent Events.
+// The returned channel is closed when the context is cancelled or the
+// connection is terminated. Callers should handle reconnection if needed.
+func (c *Client) SubscribeAgentInfo(ctx context.Context, id string) (<-chan proto.AgentInfo, error) {
+	ch := make(chan proto.AgentInfo, 10)
+	//nolint:bodyclose
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/agent/stream", id), nil, http.Header{
+		"Accept":        []string{"text/event-stream"},
+		"Cache-Control": []string{"no-cache"},
+		"Connection":    []string{"keep-alive"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to agent info: %w", err)
+	}
+	if rsp.StatusCode != http.StatusOK {
+		rsp.Body.Close()
+		return nil, fmt.Errorf("failed to subscribe to agent info: status code %d", rsp.StatusCode)
+	}
+
+	go func() {
+		defer rsp.Body.Close()
+		defer close(ch)
+
+		scr := bufio.NewReader(rsp.Body)
+		for {
+			line, err := scr.ReadBytes('\n')
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				slog.Error("Reading from agent info stream", "error", err)
+				break
+			}
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 || bytes.HasPrefix(line, []byte(":")) {
+				// Empty line or SSE comment (keepalive).
+				continue
+			}
+			data, ok := bytes.CutPrefix(line, []byte("data:"))
+			if !ok {
+				continue
+			}
+			data = bytes.TrimSpace(data)
+			var info proto.AgentInfo
+			if err := json.Unmarshal(data, &info); err != nil {
+				slog.Error("Unmarshaling agent info", "error", err)
+				continue
+			}
+			select {
+			case ch <- info:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
 func (c *Client) UpdateAgent(ctx context.Context, id string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent/update", id), nil, nil, nil)
 	if err != nil {

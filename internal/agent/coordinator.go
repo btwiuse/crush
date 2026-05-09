@@ -204,6 +204,11 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 			PresencePenalty:  presPenalty,
 		})
 	}
+	if c.notify != nil {
+		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			Type: notify.TypeAgentBusy,
+		})
+	}
 	beforeLoaded := c.skillTracker.LoadedNames()
 	result, originalErr := run()
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)

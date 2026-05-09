@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -645,18 +646,93 @@ func (c *controllerV1) handleGetWorkspaceAgent(w http.ResponseWriter, r *http.Re
 	jsonEncode(w, info)
 }
 
-// handlePostWorkspaceAgent sends a message to the agent.
+// handleGetWorkspaceAgentStream streams agent info updates as Server-Sent Events.
 //
-//	@Summary		Send message to agent
+//	@Summary		Stream agent info (SSE)
 //	@Tags			agent
-//	@Accept			json
-//	@Param			id		path	string				true	"Workspace ID"
-//	@Param			request	body	proto.AgentMessage	true	"Agent message"
+//	@Produce		text/event-stream
+//	@Param			id	path	string	true	"Workspace ID"
 //	@Success		200
-//	@Failure		400	{object}	proto.Error
 //	@Failure		404	{object}	proto.Error
 //	@Failure		500	{object}	proto.Error
-//	@Router			/workspaces/{id}/agent [post]
+//	@Router			/workspaces/{id}/agent/stream [get]
+func (c *controllerV1) handleGetWorkspaceAgentStream(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	events, err := c.backend.SubscribeEvents(r.Context(), id)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher := http.NewResponseController(w)
+
+	sendInfo := func(info proto.AgentInfo) {
+		data, err := json.Marshal(info)
+		if err != nil {
+			c.server.logError(r, "Failed to marshal agent info", "error", err)
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// Send initial state.
+	info, err := c.backend.GetAgentInfo(id)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	sendInfo(info)
+
+	// Track relevant fields to detect changes.
+	lastBusy := info.IsBusy
+	lastReady := info.IsReady
+	lastModelID := info.Model.ID
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			c.server.logDebug(r, "Stopping agent stream")
+			return
+		case <-ticker.C:
+			fmt.Fprintf(w, ": keepalive\n\n")
+			flusher.Flush()
+		case _, ok := <-events:
+			if !ok {
+				return
+			}
+			newInfo, err := c.backend.GetAgentInfo(id)
+			if err != nil {
+				continue
+			}
+			if newInfo.IsBusy != lastBusy || newInfo.IsReady != lastReady || newInfo.Model.ID != lastModelID {
+				sendInfo(newInfo)
+				lastBusy = newInfo.IsBusy
+				lastReady = newInfo.IsReady
+				lastModelID = newInfo.Model.ID
+			}
+		}
+	}
+}
+
+// @Summary		Send message to agent
+// @Tags			agent
+// @Accept			json
+// @Param			id		path	string				true	"Workspace ID"
+// @Param			request	body	proto.AgentMessage	true	"Agent message"
+// @Success		200
+// @Failure		400	{object}	proto.Error
+// @Failure		404	{object}	proto.Error
+// @Failure		500	{object}	proto.Error
+// @Router			/workspaces/{id}/agent [post]
 func (c *controllerV1) handlePostWorkspaceAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
