@@ -609,7 +609,7 @@ func (w *ClientWorkspace) subscribeAgentInfo() {
 			w.agentInfoReady = true
 			w.agentMu.Unlock()
 		}
-		// Channel closed; the workspace may have been shut down.
+		// SSE stream ended; stop retrying.
 		break
 	}
 }

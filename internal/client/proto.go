@@ -325,6 +325,8 @@ func (c *Client) GetAgentInfo(ctx context.Context, id string) (*proto.AgentInfo,
 // The returned channel is closed when the context is cancelled or the
 // connection is terminated. Callers should handle reconnection if needed.
 func (c *Client) SubscribeAgentInfo(ctx context.Context, id string) (<-chan proto.AgentInfo, error) {
+	// Buffer of 10 accommodates bursts of rapid state changes (e.g. busy
+	// toggling quickly) without blocking the SSE reader goroutine.
 	ch := make(chan proto.AgentInfo, 10)
 	//nolint:bodyclose
 	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/agent/stream", id), nil, http.Header{
