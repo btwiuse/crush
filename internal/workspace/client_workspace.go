@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
+	jrpc "github.com/charmbracelet/crush/internal/jsonrpc"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
@@ -208,9 +209,12 @@ func (w *ClientWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Me
 // -- Agent --
 
 // agentInfo returns the cached AgentInfo, refreshing it via WebSocket
-// (or HTTP) if the cache has expired. All three AgentIsReady /
-// AgentIsBusy / AgentModel callers share the same cached value so we
-// pay at most one network round-trip per cache TTL window.
+// if the cache has expired. All three AgentIsReady / AgentIsBusy /
+// AgentModel callers share the same cached value so we pay at most one
+// network round-trip per cache TTL window.
+//
+// The GET /v1/workspaces/{id}/agent HTTP endpoint has been removed;
+// this method requires a live WSClient.
 func (w *ClientWorkspace) agentInfo() proto.AgentInfo {
 	w.agentInfoMu.RLock()
 	if time.Since(w.cachedAgentInfoAt) < agentCacheTTL {
@@ -220,18 +224,15 @@ func (w *ClientWorkspace) agentInfo() proto.AgentInfo {
 	}
 	w.agentInfoMu.RUnlock()
 
-	// Re-fetch.
+	// Re-fetch via WebSocket.
 	var info proto.AgentInfo
-	if w.wsClient != nil {
-		params := map[string]string{"id": w.workspaceID()}
-		if err := w.wsClient.Call(context.Background(), "agent.info", params, &info); err != nil {
-			slog.Debug("WSClient agent.info failed", "workspace", w.workspaceID(), "error", err)
-		}
-	} else {
-		fetched, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-		if err == nil && fetched != nil {
-			info = *fetched
-		}
+	if w.wsClient == nil {
+		slog.Debug("WSClient unavailable for agent.info", "workspace", w.workspaceID())
+		return info
+	}
+	params := map[string]string{"id": w.workspaceID()}
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodAgentInfo, params, &info); err != nil {
+		slog.Debug("WSClient agent.info failed", "workspace", w.workspaceID(), "error", err)
 	}
 
 	w.agentInfoMu.Lock()
@@ -283,8 +284,14 @@ func (w *ClientWorkspace) AgentQueuedPrompts(sessionID string) int {
 	}
 	w.queuedMu.RUnlock()
 
-	count, err := w.client.GetAgentSessionQueuedPrompts(context.Background(), w.workspaceID(), sessionID)
-	if err != nil {
+	// GET /v1/.../prompts/queued removed; use WebSocket.
+	if w.wsClient == nil {
+		return 0
+	}
+	params := map[string]string{"id": w.workspaceID(), "session_id": sessionID}
+	var count int
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodAgentQueuedCount, params, &count); err != nil {
+		slog.Debug("WSClient agent.queue.count failed", "workspace", w.workspaceID(), "error", err)
 		return 0
 	}
 	w.queuedMu.Lock()
@@ -306,8 +313,14 @@ func (w *ClientWorkspace) AgentQueuedPromptsList(sessionID string) []string {
 	}
 	w.queuedMu.RUnlock()
 
-	prompts, err := w.client.GetAgentSessionQueuedPromptsList(context.Background(), w.workspaceID(), sessionID)
-	if err != nil {
+	// GET /v1/.../prompts/list removed; use WebSocket.
+	if w.wsClient == nil {
+		return nil
+	}
+	params := map[string]string{"id": w.workspaceID(), "session_id": sessionID}
+	var prompts []string
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodAgentQueuedList, params, &prompts); err != nil {
+		slog.Debug("WSClient agent.queue.list failed", "workspace", w.workspaceID(), "error", err)
 		return nil
 	}
 	w.queuedMu.Lock()
@@ -402,8 +415,14 @@ func (w *ClientWorkspace) PermissionSkipRequests() bool {
 	}
 	w.permSkipMu.RUnlock()
 
-	skip, err := w.client.GetPermissionsSkipRequests(context.Background(), w.workspaceID())
-	if err != nil {
+	// GET /v1/.../permissions/skip removed; use WebSocket.
+	if w.wsClient == nil {
+		return false
+	}
+	params := map[string]string{"id": w.workspaceID()}
+	var skip bool
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodPermissionsGetSkip, params, &skip); err != nil {
+		slog.Debug("WSClient permissions.get_skip failed", "workspace", w.workspaceID(), "error", err)
 		return false
 	}
 	w.permSkipMu.Lock()
@@ -658,27 +677,19 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 		program.Quit()
 	})
 
-	var evc <-chan any
-
-	// Prefer the persistent WebSocket event stream when available.
-	if w.wsClient != nil {
-		ch, err := w.wsClient.SubscribeEvents(context.Background(), w.workspaceID())
-		if err == nil {
-			evc = ch
-		} else {
-			slog.Warn("WSClient event subscription failed, falling back to SSE",
-				"workspace", w.workspaceID(), "error", err)
-		}
+	// GET /v1/workspaces/{id}/events (SSE) has been removed.
+	// All events are delivered over the persistent WebSocket connection.
+	if w.wsClient == nil {
+		slog.Error("WSClient unavailable; cannot subscribe to events",
+			"workspace", w.workspaceID())
+		return
 	}
 
-	// Fall back to SSE when no WebSocket is available.
-	if evc == nil {
-		ch, err := w.client.SubscribeEvents(context.Background(), w.workspaceID())
-		if err != nil {
-			slog.Error("Failed to subscribe to events", "error", err)
-			return
-		}
-		evc = ch
+	evc, err := w.wsClient.SubscribeEvents(context.Background(), w.workspaceID())
+	if err != nil {
+		slog.Error("WSClient event subscription failed",
+			"workspace", w.workspaceID(), "error", err)
+		return
 	}
 
 	for ev := range evc {
