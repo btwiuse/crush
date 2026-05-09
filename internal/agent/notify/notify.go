@@ -12,6 +12,9 @@ const (
 	// TypeReAuthenticate indicates the agent encountered an
 	// authentication error and the user needs to re-authenticate.
 	TypeReAuthenticate Type = "re_authenticate"
+	// TypeAgentBusy indicates the agent has started processing a
+	// request and is now busy.
+	TypeAgentBusy Type = "agent_busy"
 )
 
 // Notification represents a domain event published by the agent.

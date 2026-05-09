@@ -34,6 +34,14 @@ type ClientWorkspace struct {
 
 	mu sync.RWMutex
 	ws proto.Workspace
+
+	// agentMu protects the cached agent info received via SSE.
+	agentMu         sync.RWMutex
+	cachedAgentInfo proto.AgentInfo
+	agentInfoReady  bool
+
+	// agentSubCancel cancels the agent info SSE subscription goroutine.
+	agentSubCancel context.CancelFunc
 }
 
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
@@ -43,10 +51,14 @@ func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
 	if ws.Config != nil {
 		ws.Config.SetupAgents()
 	}
-	return &ClientWorkspace{
-		client: c,
-		ws:     ws,
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &ClientWorkspace{
+		client:         c,
+		ws:             ws,
+		agentSubCancel: cancel,
 	}
+	go w.subscribeAgentInfo(ctx)
+	return w
 }
 
 // refreshWorkspace re-fetches the workspace from the server, updating
@@ -168,11 +180,9 @@ func (w *ClientWorkspace) AgentCancel(sessionID string) {
 }
 
 func (w *ClientWorkspace) AgentIsBusy() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsBusy
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	return w.agentInfoReady && w.cachedAgentInfo.IsBusy
 }
 
 func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
@@ -184,22 +194,21 @@ func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
 }
 
 func (w *ClientWorkspace) AgentModel() AgentModel {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	if !w.agentInfoReady {
 		return AgentModel{}
 	}
 	return AgentModel{
-		CatwalkCfg: info.Model,
-		ModelCfg:   info.ModelCfg,
+		CatwalkCfg: w.cachedAgentInfo.Model,
+		ModelCfg:   w.cachedAgentInfo.ModelCfg,
 	}
 }
 
 func (w *ClientWorkspace) AgentIsReady() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsReady
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	return w.agentInfoReady && w.cachedAgentInfo.IsReady
 }
 
 func (w *ClientWorkspace) AgentQueuedPrompts(sessionID string) int {
@@ -559,7 +568,48 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 	}
 }
 
+// subscribeAgentInfo connects to the agent info SSE stream and keeps the
+// cached AgentInfo up to date. It retries with a backoff on connection
+// failure or disconnect, and stops when ctx is cancelled.
+func (w *ClientWorkspace) subscribeAgentInfo(ctx context.Context) {
+	const retryDelay = 3 * time.Second
+	for {
+		ch, err := w.client.SubscribeAgentInfo(ctx, w.workspaceID())
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("Failed to subscribe to agent info, retrying", "error", err, "delay", retryDelay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryDelay):
+			}
+			continue
+		}
+		for info := range ch {
+			w.agentMu.Lock()
+			w.cachedAgentInfo = info
+			w.agentInfoReady = true
+			w.agentMu.Unlock()
+		}
+		// Channel closed — retry unless context is cancelled.
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Debug("Agent info SSE stream closed, reconnecting", "delay", retryDelay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryDelay):
+		}
+	}
+}
+
 func (w *ClientWorkspace) Shutdown() {
+	if w.agentSubCancel != nil {
+		w.agentSubCancel()
+	}
 	_ = w.client.DeleteWorkspace(context.Background(), w.workspaceID())
 }
 
