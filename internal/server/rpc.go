@@ -628,9 +628,15 @@ func (s *Server) handlePostWorkspaceAgent(ctx context.Context, params json.RawMe
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, &jrpcError{Code: jrpcInvalidParams, Message: "Invalid params"}
 	}
-	if err := s.backend.SendMessage(ctx, req.ID, req.Msg); err != nil {
-		return nil, mapErr(err)
-	}
+
+	// Run the agent in a goroutine so the JSON-RPC read loop stays free
+	// to process other requests (e.g. permission grants) while the agent
+	// is waiting. The ctx stays valid until the WebSocket closes.
+	go func() {
+		if err := s.backend.SendMessage(ctx, req.ID, req.Msg); err != nil {
+			slog.Error("Agent run failed", "error", err)
+		}
+	}()
 	return nil, nil
 }
 
@@ -639,9 +645,11 @@ func (s *Server) handlePostWorkspaceAgentInit(ctx context.Context, params json.R
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &jrpcError{Code: jrpcInvalidParams, Message: "Invalid params"}
 	}
-	if err := s.backend.InitAgent(ctx, p.ID); err != nil {
-		return nil, mapErr(err)
-	}
+	go func() {
+		if err := s.backend.InitAgent(ctx, p.ID); err != nil {
+			slog.Error("Agent init failed", "error", err)
+		}
+	}()
 	return nil, nil
 }
 
@@ -650,9 +658,11 @@ func (s *Server) handlePostWorkspaceAgentUpdate(ctx context.Context, params json
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &jrpcError{Code: jrpcInvalidParams, Message: "Invalid params"}
 	}
-	if err := s.backend.UpdateAgent(ctx, p.ID); err != nil {
-		return nil, mapErr(err)
-	}
+	go func() {
+		if err := s.backend.UpdateAgent(ctx, p.ID); err != nil {
+			slog.Error("Agent update failed", "error", err)
+		}
+	}()
 	return nil, nil
 }
 
@@ -707,9 +717,11 @@ func (s *Server) handlePostWorkspaceAgentSessionSummarize(ctx context.Context, p
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, &jrpcError{Code: jrpcInvalidParams, Message: "Invalid params"}
 	}
-	if err := s.backend.SummarizeSession(ctx, p.ID, p.SessionID); err != nil {
-		return nil, mapErr(err)
-	}
+	go func() {
+		if err := s.backend.SummarizeSession(ctx, p.ID, p.SessionID); err != nil {
+			slog.Error("Session summarization failed", "error", err)
+		}
+	}()
 	return nil, nil
 }
 
