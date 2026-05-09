@@ -73,7 +73,7 @@ func NewClient(path, network, address string) (*Client, error) {
 	c := &Client{
 		path:    path,
 		network: network,
-		addr:    address,
+		addr:    ensurePort(address, network),
 		pending: make(map[int64]chan<- *jrpcResponse),
 		eventCh: make(chan any, 100),
 		closed:  make(chan struct{}),
@@ -84,6 +84,25 @@ func NewClient(path, network, address string) (*Client, error) {
 	return c, nil
 }
 
+// ensurePort adds a default port to address when missing, based on the
+// network scheme. Unix and named-pipe addresses are returned as-is.
+func ensurePort(address, network string) string {
+	switch network {
+	case "unix", "npipe":
+		return address
+	}
+	// No port → add default.
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		switch network {
+		case "https":
+			return net.JoinHostPort(address, "443")
+		default:
+			return net.JoinHostPort(address, "80")
+		}
+	}
+	return address
+}
+
 // Path returns the client's workspace filesystem path.
 func (c *Client) Path() string {
 	return c.path
@@ -91,16 +110,27 @@ func (c *Client) Path() string {
 
 // dial establishes the WebSocket connection.
 func (c *Client) dial() error {
-	tr := &http.Transport{
-		DialContext: c.dialer,
-	}
-	if c.network == "npipe" || c.network == "unix" {
+	var wsURL string
+	var hc *http.Client
+
+	switch c.network {
+	case "unix", "npipe":
+		tr := &http.Transport{DialContext: c.dialer}
 		tr.DisableCompression = true
+		hc = &http.Client{Transport: tr}
+		wsURL = "ws://" + DummyHost + "/v1/rpc"
+	case "https":
+		tr := &http.Transport{DialContext: c.dialer}
+		hc = &http.Client{Transport: tr}
+		wsURL = "wss://" + c.addr + "/v1/rpc"
+	default:
+		// http, tcp, or any other TCP-based scheme
+		tr := &http.Transport{DialContext: c.dialer}
+		hc = &http.Client{Transport: tr}
+		wsURL = "ws://" + c.addr + "/v1/rpc"
 	}
 
-	hc := &http.Client{Transport: tr}
-
-	conn, _, err := websocket.Dial(context.Background(), "ws://"+DummyHost+"/v1/rpc", &websocket.DialOptions{
+	conn, _, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{
 		HTTPClient: hc,
 	})
 	if err != nil {
@@ -125,7 +155,8 @@ func (c *Client) dialer(ctx context.Context, network, address string) (net.Conn,
 	case "unix":
 		return d.DialContext(ctx, "unix", c.addr)
 	default:
-		return d.DialContext(ctx, network, address)
+		// http, https, tcp — dial using the stored address
+		return d.DialContext(ctx, "tcp", c.addr)
 	}
 }
 
