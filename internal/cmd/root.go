@@ -47,11 +47,18 @@ import (
 
 var clientHost string
 
+func defaultClientHost() string {
+	if h := os.Getenv("CRUSH_HOST"); h != "" {
+		return h
+	}
+	return server.DefaultHost()
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringP("cwd", "c", "", "Current working directory")
 	rootCmd.PersistentFlags().StringP("data-dir", "D", "", "Custom crush data directory")
 	rootCmd.PersistentFlags().BoolP("debug", "d", false, "Debug")
-	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", server.DefaultHost(), "Connect to a specific crush server host (for advanced users)")
+	rootCmd.PersistentFlags().StringVarP(&clientHost, "host", "H", defaultClientHost(), "Connect to a specific crush server host (for advanced users)")
 	rootCmd.Flags().BoolP("help", "h", false, "Help")
 	rootCmd.Flags().BoolP("yolo", "y", false, "Automatically accept all permissions (dangerous mode)")
 	rootCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
