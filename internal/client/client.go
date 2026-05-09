@@ -136,6 +136,7 @@ func (c *Client) dial() error {
 	if err != nil {
 		return err
 	}
+	conn.SetReadLimit(-1)
 
 	c.conn = conn
 	go c.readLoop()
@@ -217,6 +218,10 @@ func (c *Client) readLoop() {
 }
 
 // call sends a JSON-RPC request and waits for the response.
+// ErrConnectionClosed is returned when the WebSocket connection to the server
+// is lost. Callers can use errors.Is to detect this condition.
+var ErrConnectionClosed = errors.New("connection to the server was closed")
+
 func (c *Client) call(ctx context.Context, method string, params, result any) error {
 	var rawParams json.RawMessage
 	if params != nil {
@@ -251,13 +256,16 @@ func (c *Client) call(ctx context.Context, method string, params, result any) er
 	err := c.conn.Write(ctx, websocket.MessageText, mustMarshal(req))
 	c.wmu.Unlock()
 	if err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			return ErrConnectionClosed
+		}
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 
 	select {
 	case resp := <-ch:
 		if resp == nil {
-			return errors.New("connection closed")
+			return ErrConnectionClosed
 		}
 		if resp.Error != nil {
 			var jrpcErr struct {
@@ -278,7 +286,7 @@ func (c *Client) call(ctx context.Context, method string, params, result any) er
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-c.closed:
-		return errors.New("connection closed")
+		return ErrConnectionClosed
 	}
 }
 

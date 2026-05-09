@@ -128,6 +128,8 @@ func serveJRPC(ctx context.Context, conn *websocket.Conn, router jrpcRouter) {
 			continue
 		}
 
+		slog.Info("JSON-RPC request", "method", msg.Method)
+
 		result, err := handler(ctx, msg.Params)
 		if err != nil {
 			var jErr *jrpcError
@@ -213,6 +215,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
+	conn.SetReadLimit(-1)
 	defer conn.CloseNow()
 
 	ctx := context.WithValue(r.Context(), jrpcConnKey, &jrpcConn{
