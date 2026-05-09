@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/user"
 	"runtime"
 	"strings"
@@ -45,6 +46,9 @@ func ParseHostURL(host string) (*url.URL, error) {
 
 // DefaultHost returns the default server host.
 func DefaultHost() string {
+        if h := os.Getenv("CRUSH_HOST"); h != "" {
+                return h
+        }
 	sock := "crush.sock"
 	usr, err := user.Current()
 	if err == nil && usr.Uid != "" {
