@@ -65,6 +65,16 @@ func (c *Client) Path() string {
 	return c.path
 }
 
+// Network returns the network type used by the client (e.g., "unix", "tcp").
+func (c *Client) Network() string {
+	return c.network
+}
+
+// Addr returns the server address used by the client.
+func (c *Client) Addr() string {
+	return c.addr
+}
+
 // GetGlobalConfig retrieves the server's configuration.
 func (c *Client) GetGlobalConfig(ctx context.Context) (*config.Config, error) {
 	var cfg config.Config

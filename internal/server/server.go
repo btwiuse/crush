@@ -166,6 +166,7 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/enable", c.handlePostWorkspaceMCPEnableDocker)
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/disable", c.handlePostWorkspaceMCPDisableDocker)
 	mux.Handle("/v1/docs/", httpswagger.WrapHandler)
+	mux.HandleFunc("/v1/ws", s.handleWebSocket)
 	s.h = &http.Server{
 		Protocols: &p,
 		Handler:   s.loggingHandler(mux),

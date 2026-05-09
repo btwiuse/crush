@@ -29,24 +29,71 @@ import (
 // operations to a remote server via the client SDK. It caches the
 // proto.Workspace returned at creation time and refreshes it after
 // config-mutating operations.
+//
+// It also maintains a persistent WebSocket connection (wsClient) for
+// event push and to serve the high-frequency polling methods
+// (AgentIsReady, AgentIsBusy, AgentModel, AgentQueuedPrompts,
+// PermissionSkipRequests) from a short-lived local cache, eliminating
+// per-render-frame HTTP requests.
 type ClientWorkspace struct {
-	client *client.Client
+	client   *client.Client
+	wsClient *client.WSClient
 
 	mu sync.RWMutex
 	ws proto.Workspace
+
+	// Agent info cache — refreshed via WSClient, shared across
+	// AgentIsReady/AgentIsBusy/AgentModel to avoid triple HTTP calls
+	// per UI frame.
+	agentInfoMu       sync.RWMutex
+	cachedAgentInfo   proto.AgentInfo
+	cachedAgentInfoAt time.Time
+
+	// Permission-skip cache.
+	permSkipMu       sync.RWMutex
+	cachedPermSkip   bool
+	cachedPermSkipAt time.Time
+
+	// Queued-prompts cache keyed by sessionID.
+	queuedMu     sync.RWMutex
+	cachedQueued map[string]cachedQueuedEntry
 }
+
+type cachedQueuedEntry struct {
+	count int
+	list  []string
+	at    time.Time
+}
+
+// agentCacheTTL is the maximum age of the cached AgentInfo before
+// re-fetching. It is intentionally short so that the cache stays
+// fresh across a render cycle while avoiding per-frame HTTP requests.
+const agentCacheTTL = 100 * time.Millisecond
 
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
 // operations through the given client SDK. The ws parameter is the
 // proto.Workspace snapshot returned by the server at creation time.
+//
+// It also attempts to establish a WebSocket connection for efficient
+// event streaming and state caching. If the connection fails, the
+// workspace continues to work using HTTP-only transport.
 func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
 	if ws.Config != nil {
 		ws.Config.SetupAgents()
 	}
-	return &ClientWorkspace{
-		client: c,
-		ws:     ws,
+	cw := &ClientWorkspace{
+		client:       c,
+		ws:           ws,
+		cachedQueued: make(map[string]cachedQueuedEntry),
 	}
+	// Best-effort WebSocket connection; fall back to HTTP if it fails.
+	wsc, err := client.NewWSClient(c.Network(), c.Addr())
+	if err != nil {
+		slog.Warn("Failed to connect WebSocket client, falling back to HTTP", "error", err)
+	} else {
+		cw.wsClient = wsc
+	}
+	return cw
 }
 
 // refreshWorkspace re-fetches the workspace from the server, updating
@@ -159,6 +206,40 @@ func (w *ClientWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Me
 
 // -- Agent --
 
+// agentInfo returns the cached AgentInfo, refreshing it via WebSocket
+// (or HTTP) if the cache has expired. All three AgentIsReady /
+// AgentIsBusy / AgentModel callers share the same cached value so we
+// pay at most one network round-trip per cache TTL window.
+func (w *ClientWorkspace) agentInfo() proto.AgentInfo {
+	w.agentInfoMu.RLock()
+	if time.Since(w.cachedAgentInfoAt) < agentCacheTTL {
+		info := w.cachedAgentInfo
+		w.agentInfoMu.RUnlock()
+		return info
+	}
+	w.agentInfoMu.RUnlock()
+
+	// Re-fetch.
+	var info proto.AgentInfo
+	if w.wsClient != nil {
+		params := map[string]string{"id": w.workspaceID()}
+		if err := w.wsClient.Call(context.Background(), "agent.info", params, &info); err != nil {
+			slog.Debug("WSClient agent.info failed", "error", err)
+		}
+	} else {
+		fetched, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
+		if err == nil && fetched != nil {
+			info = *fetched
+		}
+	}
+
+	w.agentInfoMu.Lock()
+	w.cachedAgentInfo = info
+	w.cachedAgentInfoAt = time.Now()
+	w.agentInfoMu.Unlock()
+	return info
+}
+
 func (w *ClientWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error {
 	return w.client.SendMessage(ctx, w.workspaceID(), sessionID, prompt, attachments...)
 }
@@ -168,11 +249,7 @@ func (w *ClientWorkspace) AgentCancel(sessionID string) {
 }
 
 func (w *ClientWorkspace) AgentIsBusy() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsBusy
+	return w.agentInfo().IsBusy
 }
 
 func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
@@ -184,10 +261,7 @@ func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
 }
 
 func (w *ClientWorkspace) AgentModel() AgentModel {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return AgentModel{}
-	}
+	info := w.agentInfo()
 	return AgentModel{
 		CatwalkCfg: info.Model,
 		ModelCfg:   info.ModelCfg,
@@ -195,26 +269,52 @@ func (w *ClientWorkspace) AgentModel() AgentModel {
 }
 
 func (w *ClientWorkspace) AgentIsReady() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsReady
+	return w.agentInfo().IsReady
 }
 
 func (w *ClientWorkspace) AgentQueuedPrompts(sessionID string) int {
+	w.queuedMu.RLock()
+	e, ok := w.cachedQueued[sessionID]
+	if ok && time.Since(e.at) < agentCacheTTL {
+		count := e.count
+		w.queuedMu.RUnlock()
+		return count
+	}
+	w.queuedMu.RUnlock()
+
 	count, err := w.client.GetAgentSessionQueuedPrompts(context.Background(), w.workspaceID(), sessionID)
 	if err != nil {
 		return 0
 	}
+	w.queuedMu.Lock()
+	entry := w.cachedQueued[sessionID]
+	entry.count = count
+	entry.at = time.Now()
+	w.cachedQueued[sessionID] = entry
+	w.queuedMu.Unlock()
 	return count
 }
 
 func (w *ClientWorkspace) AgentQueuedPromptsList(sessionID string) []string {
+	w.queuedMu.RLock()
+	e, ok := w.cachedQueued[sessionID]
+	if ok && time.Since(e.at) < agentCacheTTL {
+		list := e.list
+		w.queuedMu.RUnlock()
+		return list
+	}
+	w.queuedMu.RUnlock()
+
 	prompts, err := w.client.GetAgentSessionQueuedPromptsList(context.Background(), w.workspaceID(), sessionID)
 	if err != nil {
 		return nil
 	}
+	w.queuedMu.Lock()
+	entry := w.cachedQueued[sessionID]
+	entry.list = prompts
+	entry.at = time.Now()
+	w.cachedQueued[sessionID] = entry
+	w.queuedMu.Unlock()
 	return prompts
 }
 
@@ -293,10 +393,22 @@ func (w *ClientWorkspace) PermissionDeny(perm permission.PermissionRequest) {
 }
 
 func (w *ClientWorkspace) PermissionSkipRequests() bool {
+	w.permSkipMu.RLock()
+	if time.Since(w.cachedPermSkipAt) < agentCacheTTL {
+		v := w.cachedPermSkip
+		w.permSkipMu.RUnlock()
+		return v
+	}
+	w.permSkipMu.RUnlock()
+
 	skip, err := w.client.GetPermissionsSkipRequests(context.Background(), w.workspaceID())
 	if err != nil {
 		return false
 	}
+	w.permSkipMu.Lock()
+	w.cachedPermSkip = skip
+	w.cachedPermSkipAt = time.Now()
+	w.permSkipMu.Unlock()
 	return skip
 }
 
@@ -545,13 +657,32 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 		program.Quit()
 	})
 
-	evc, err := w.client.SubscribeEvents(context.Background(), w.workspaceID())
-	if err != nil {
-		slog.Error("Failed to subscribe to events", "error", err)
-		return
+	var evc <-chan any
+
+	// Prefer the persistent WebSocket event stream when available.
+	if w.wsClient != nil {
+		ch, err := w.wsClient.SubscribeEvents(context.Background(), w.workspaceID())
+		if err == nil {
+			evc = ch
+		} else {
+			slog.Warn("WSClient event subscription failed, falling back to SSE", "error", err)
+		}
+	}
+
+	// Fall back to SSE when no WebSocket is available.
+	if evc == nil {
+		ch, err := w.client.SubscribeEvents(context.Background(), w.workspaceID())
+		if err != nil {
+			slog.Error("Failed to subscribe to events", "error", err)
+			return
+		}
+		evc = ch
 	}
 
 	for ev := range evc {
+		// Invalidate caches when agent-state-bearing events arrive.
+		w.invalidateCachesOnEvent(ev)
+
 		translated := translateEvent(ev)
 		if translated != nil {
 			program.Send(translated)
@@ -559,7 +690,27 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 	}
 }
 
+// invalidateCachesOnEvent resets the TTL-based caches when an event
+// that might change agent or permission state arrives.
+func (w *ClientWorkspace) invalidateCachesOnEvent(ev any) {
+	switch ev.(type) {
+	case pubsub.Event[proto.AgentEvent]:
+		// Agent state may have changed; reset the agent info cache so the
+		// next call re-fetches.
+		w.agentInfoMu.Lock()
+		w.cachedAgentInfoAt = time.Time{}
+		w.agentInfoMu.Unlock()
+	case pubsub.Event[proto.PermissionNotification]:
+		w.permSkipMu.Lock()
+		w.cachedPermSkipAt = time.Time{}
+		w.permSkipMu.Unlock()
+	}
+}
+
 func (w *ClientWorkspace) Shutdown() {
+	if w.wsClient != nil {
+		_ = w.wsClient.Close()
+	}
 	_ = w.client.DeleteWorkspace(context.Background(), w.workspaceID())
 }
 
