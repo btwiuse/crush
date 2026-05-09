@@ -89,7 +89,8 @@ func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
 	// Best-effort WebSocket connection; fall back to HTTP if it fails.
 	wsc, err := client.NewWSClient(c.Network(), c.Addr())
 	if err != nil {
-		slog.Warn("Failed to connect WebSocket client, falling back to HTTP", "error", err)
+		slog.Warn("Failed to connect WebSocket client, falling back to HTTP",
+			"workspace", ws.ID, "error", err)
 	} else {
 		cw.wsClient = wsc
 	}
@@ -224,7 +225,7 @@ func (w *ClientWorkspace) agentInfo() proto.AgentInfo {
 	if w.wsClient != nil {
 		params := map[string]string{"id": w.workspaceID()}
 		if err := w.wsClient.Call(context.Background(), "agent.info", params, &info); err != nil {
-			slog.Debug("WSClient agent.info failed", "error", err)
+			slog.Debug("WSClient agent.info failed", "workspace", w.workspaceID(), "error", err)
 		}
 	} else {
 		fetched, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
@@ -665,7 +666,8 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 		if err == nil {
 			evc = ch
 		} else {
-			slog.Warn("WSClient event subscription failed, falling back to SSE", "error", err)
+			slog.Warn("WSClient event subscription failed, falling back to SSE",
+				"workspace", w.workspaceID(), "error", err)
 		}
 	}
 

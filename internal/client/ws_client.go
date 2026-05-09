@@ -374,7 +374,9 @@ func (c *WSClient) Close() error {
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		)
-		_ = err
+		if err != nil {
+			slog.Debug("WSClient: failed to send close message", "error", err)
+		}
 		return c.conn.Close()
 	}
 	return nil

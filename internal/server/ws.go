@@ -1012,7 +1012,8 @@ func (c *controllerWS) handleEventsSubscribe(ctx context.Context, req jrpc.Reque
 			}
 			notif, err := jrpc.NewNotification(jrpc.MethodEventPush, wrapped)
 			if err != nil {
-				slog.Error("Failed to create event notification", "error", err)
+				slog.Error("Failed to create event notification",
+					"workspace", p.ID, "event_type", fmt.Sprintf("%T", ev.Payload), "error", err)
 				continue
 			}
 			if err := c.conn.writeJSON(notif); err != nil {

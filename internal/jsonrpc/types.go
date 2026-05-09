@@ -2,7 +2,10 @@
 // by the Crush WebSocket transport.
 package jsonrpc
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // Version is the JSON-RPC protocol version string.
 const Version = "2.0"
@@ -36,7 +39,7 @@ func (id ID) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements the json.Unmarshaler interface.
 func (id *ID) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
+	if bytes.Equal(data, []byte("null")) {
 		return nil
 	}
 	// Try number first.
