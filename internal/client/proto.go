@@ -328,8 +328,7 @@ func (c *Client) SubscribeAgentInfo(ctx context.Context, id string) (<-chan prot
 	// Buffer of 10 accommodates bursts of rapid state changes (e.g. busy
 	// toggling quickly) without blocking the SSE reader goroutine.
 	ch := make(chan proto.AgentInfo, 10)
-	//nolint:bodyclose
-	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/agent/stream", id), nil, http.Header{
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/agent/stream", id), nil, http.Header{ //nolint:bodyclose // body is closed inside the goroutine below
 		"Accept":        []string{"text/event-stream"},
 		"Cache-Control": []string{"no-cache"},
 		"Connection":    []string{"keep-alive"},
@@ -346,9 +345,9 @@ func (c *Client) SubscribeAgentInfo(ctx context.Context, id string) (<-chan prot
 		defer rsp.Body.Close()
 		defer close(ch)
 
-		scr := bufio.NewReader(rsp.Body)
+		reader := bufio.NewReader(rsp.Body)
 		for {
-			line, err := scr.ReadBytes('\n')
+			line, err := reader.ReadBytes('\n')
 			if errors.Is(err, io.EOF) {
 				break
 			}
