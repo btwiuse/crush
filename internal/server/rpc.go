@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 )
 
@@ -931,6 +932,17 @@ func (s *Server) handleSubscribeEvents(ctx context.Context, params json.RawMessa
 			for range events {
 			}
 		}()
+
+		// Push current agent state immediately.
+		if info, err := s.backend.GetAgentInfo(p.ID); err == nil {
+			wrapped := wrapEvent(pubsub.Event[proto.AgentInfo]{
+				Type:    pubsub.UpdatedEvent,
+				Payload: info,
+			})
+			if wrapped != nil {
+				jc.notify("event", wrapped)
+			}
+		}
 
 		for {
 			select {

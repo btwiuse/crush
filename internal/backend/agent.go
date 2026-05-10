@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 // SendMessage sends a prompt to the agent coordinator for the given
@@ -20,6 +21,18 @@ func (b *Backend) SendMessage(ctx context.Context, workspaceID string, msg proto
 	}
 
 	_, err = ws.AgentCoordinator.Run(ctx, msg.SessionID, msg.Prompt)
+
+	// Publish queue state so the UI cache stays up to date.
+	if count, qErr := b.QueuedPrompts(workspaceID, msg.SessionID); qErr == nil {
+		ws.App.SendEvent(pubsub.Event[proto.PromptQueueEvent]{
+			Type: pubsub.UpdatedEvent,
+			Payload: proto.PromptQueueEvent{
+				SessionID: msg.SessionID,
+				Count:     count,
+			},
+		})
+	}
+
 	return err
 }
 
