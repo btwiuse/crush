@@ -578,6 +578,9 @@ func resolveWorkspaceSessionID(ctx context.Context, ws workspace.Workspace, id s
 }
 
 func ResolveCwd(cmd *cobra.Command) (string, error) {
+	if v := os.Getenv("CRUSH_CWD"); v != "" {
+		return v, nil
+	}
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd != "" {
 		err := os.Chdir(cwd)
