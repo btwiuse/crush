@@ -130,9 +130,7 @@ func (c *Client) dial() error {
 		wsURL = "ws://" + c.addr + "/v1/rpc"
 	}
 
-	conn, _, err := websocket.Dial(context.Background(), wsURL, &websocket.DialOptions{
-		HTTPClient: hc,
-	})
+	conn, err := dialWebSocket(context.Background(), wsURL, hc)
 	if err != nil {
 		return err
 	}
