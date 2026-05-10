@@ -313,6 +313,10 @@ func setupClientServerWorkspace(cmd *cobra.Command) (workspace.Workspace, func()
 		}
 	}
 
+	// Populate agent state cache with a one-time RPC so reads
+	// work before the event subscription starts flowing.
+	clientWs.SyncAgentState(cmd.Context())
+
 	return clientWs, cleanupServer, nil
 }
 

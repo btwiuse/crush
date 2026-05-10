@@ -132,6 +132,14 @@ func unwrapEvent(p pubsub.Payload) any {
 		var e pubsub.Event[proto.AgentEvent]
 		_ = json.Unmarshal(p.Payload, &e)
 		return e
+	case pubsub.PayloadTypeAgentState:
+		var e pubsub.Event[proto.AgentInfo]
+		_ = json.Unmarshal(p.Payload, &e)
+		return e
+	case pubsub.PayloadTypeAgentPromptQueue:
+		var e pubsub.Event[proto.PromptQueueEvent]
+		_ = json.Unmarshal(p.Payload, &e)
+		return e
 	default:
 		slog.Warn("Unknown event type", "type", p.Type)
 		return nil
