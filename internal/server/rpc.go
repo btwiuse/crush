@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"time"
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
@@ -933,6 +935,12 @@ func (s *Server) handleSubscribeEvents(ctx context.Context, params json.RawMessa
 			}
 		}()
 
+		// Debounce: skip message "updated" events if the same message
+		// was sent within the last 100ms. This prevents flooding the
+		// client during rapid streaming deltas.
+		const debounceInterval = 100 * time.Millisecond
+		lastMsgSent := make(map[string]time.Time)
+
 		// Push current agent state immediately.
 		if info, err := s.backend.GetAgentInfo(p.ID); err == nil {
 			wrapped := wrapEvent(pubsub.Event[proto.AgentInfo]{
@@ -952,6 +960,21 @@ func (s *Server) handleSubscribeEvents(ctx context.Context, params json.RawMessa
 				if !ok {
 					return
 				}
+
+				// Debounce message update events — but always send the
+				// final state (message with a FinishPart) so the client
+				// never misses the terminal update.
+				if msgEvent, ok := ev.Payload.(pubsub.Event[message.Message]); ok && msgEvent.Type == pubsub.UpdatedEvent {
+					// Always let through the final message state.
+					if msgEvent.Payload.FinishPart() == nil {
+						now := time.Now()
+						if last, exists := lastMsgSent[msgEvent.Payload.ID]; exists && now.Sub(last) < debounceInterval {
+							continue
+						}
+						lastMsgSent[msgEvent.Payload.ID] = now
+					}
+				}
+
 				wrapped := wrapEvent(ev.Payload)
 				if wrapped == nil {
 					continue
