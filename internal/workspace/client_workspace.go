@@ -581,6 +581,7 @@ func (w *ClientWorkspace) Subscribe(program boba.Program) {
 			w.agentReady = e.Payload.IsReady
 			w.agentSynced = true
 			w.agentMu.Unlock()
+			program.Send(e)
 			continue
 		}
 		// Update cached queued prompts from subscription events.

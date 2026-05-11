@@ -72,7 +72,20 @@ func (b *Backend) UpdateAgent(ctx context.Context, workspaceID string) error {
 		return err
 	}
 
-	return ws.UpdateAgentModel(ctx)
+	if err := ws.UpdateAgentModel(ctx); err != nil {
+		return err
+	}
+
+	// Publish updated agent info so the TUI cache stays up to date in
+	// client/server mode.
+	if info, err := b.GetAgentInfo(workspaceID); err == nil {
+		ws.App.SendEvent(pubsub.Event[proto.AgentInfo]{
+			Type:    pubsub.UpdatedEvent,
+			Payload: info,
+		})
+	}
+
+	return nil
 }
 
 // CancelSession cancels an ongoing agent operation for the given

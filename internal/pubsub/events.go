@@ -26,6 +26,7 @@ const (
 	PayloadTypeAgentEvent             PayloadType = "agent_event"
 	PayloadTypeAgentState             PayloadType = "agent_state"
 	PayloadTypeAgentPromptQueue       PayloadType = "agent_prompt_queue"
+	PayloadTypeSkillEvent             PayloadType = "skill_event"
 )
 
 // Payload wraps a discriminated JSON payload with a type tag.

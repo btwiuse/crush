@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/skills"
 )
 
 // wrapEvent converts a raw tea.Msg (a pubsub.Event[T] from the app
@@ -95,6 +96,23 @@ func wrapEvent(ev any) *pubsub.Payload {
 		return envelope(pubsub.PayloadTypeAgentState, e)
 	case pubsub.Event[proto.PromptQueueEvent]:
 		return envelope(pubsub.PayloadTypeAgentPromptQueue, e)
+	case pubsub.Event[skills.Event]:
+		states := make([]proto.SkillState, len(e.Payload.States))
+		for i, s := range e.Payload.States {
+			ps := proto.SkillState{
+				Name:  s.Name,
+				Path:  s.Path,
+				State: proto.SkillDiscoveryState(s.State),
+			}
+			if s.Err != nil {
+				ps.Error = s.Err.Error()
+			}
+			states[i] = ps
+		}
+		return envelope(pubsub.PayloadTypeSkillEvent, pubsub.Event[proto.SkillEvent]{
+			Type:    e.Type,
+			Payload: proto.SkillEvent{States: states},
+		})
 	default:
 		slog.Warn("Unrecognized event type for SSE wrapping", "type", fmt.Sprintf("%T", ev))
 		return nil
