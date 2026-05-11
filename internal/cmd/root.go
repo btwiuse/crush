@@ -522,6 +522,9 @@ func startDetachedServer(cmd *cobra.Command) error {
 }
 
 func shouldEnableMetrics(cfg *config.Config) bool {
+	if runtime.GOOS == "js" && runtime.GOARCH == "wasm" {
+		return false
+	}
 	if v, _ := strconv.ParseBool(os.Getenv("CRUSH_DISABLE_METRICS")); v {
 		return false
 	}
