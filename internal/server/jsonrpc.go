@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 
 	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 )
 
 // JSON-RPC 2.0 error codes.
@@ -57,7 +56,7 @@ func (r jrpcRouter) Handle(method string, h jrpcHandler) {
 // jrpcConn manages a single WebSocket connection with JSON-RPC protocol.
 // It provides thread-safe writes and manages event subscriptions.
 type jrpcConn struct {
-	conn   *websocket.Conn
+	conn   MsgConn
 	wmu    sync.Mutex
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -72,7 +71,7 @@ type jrpcConn struct {
 // serveJRPC handles the WebSocket connection's read loop. It reads
 // JSON-RPC 2.0 messages, dispatches them to registered handlers, and
 // writes responses back.
-func serveJRPC(ctx context.Context, conn *websocket.Conn, router jrpcRouter) {
+func serveJRPC(ctx context.Context, conn MsgConn, router jrpcRouter) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -93,17 +92,18 @@ func serveJRPC(ctx context.Context, conn *websocket.Conn, router jrpcRouter) {
 		default:
 		}
 
-		var msg jrpcMessage
-		if err := wsjson.Read(ctx, conn, &msg); err != nil {
+		data, err := conn.ReadMsg()
+		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			var wsErr websocket.CloseError
-			if errors.As(err, &wsErr) {
-				slog.Debug("WebSocket closed", "code", wsErr.Code, "reason", wsErr.Reason)
-				return
-			}
 			slog.Debug("WebSocket read error", "error", err)
+			return
+		}
+
+		var msg jrpcMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			slog.Debug("Failed to parse JSON-RPC message", "error", err)
 			return
 		}
 
@@ -165,7 +165,7 @@ func (jc *jrpcConn) writeResult(id int64, result any) {
 
 	jc.wmu.Lock()
 	defer jc.wmu.Unlock()
-	if err := wsjson.Write(jc.ctx, jc.conn, msg); err != nil {
+	if err := jc.conn.WriteMsg(MustMarshal(msg)); err != nil {
 		slog.Debug("Failed to write JSON-RPC response", "error", err)
 	}
 }
@@ -179,7 +179,7 @@ func (jc *jrpcConn) writeError(id int64, code int, message string) {
 
 	jc.wmu.Lock()
 	defer jc.wmu.Unlock()
-	if err := wsjson.Write(jc.ctx, jc.conn, msg); err != nil {
+	if err := jc.conn.WriteMsg(MustMarshal(msg)); err != nil {
 		slog.Debug("Failed to write JSON-RPC error", "error", err)
 	}
 }
@@ -200,7 +200,7 @@ func (jc *jrpcConn) notify(method string, params any) {
 
 	jc.wmu.Lock()
 	defer jc.wmu.Unlock()
-	if err := wsjson.Write(jc.ctx, jc.conn, msg); err != nil {
+	if err := jc.conn.WriteMsg(MustMarshal(msg)); err != nil {
 		slog.Debug("Failed to write JSON-RPC notification", "error", err)
 	}
 }
@@ -208,15 +208,15 @@ func (jc *jrpcConn) notify(method string, params any) {
 // handleWebSocket is the HTTP handler that upgrades to WebSocket and
 // starts the JSON-RPC read loop.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	wsConn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
-	conn.SetReadLimit(-1)
-	defer conn.CloseNow()
+	conn := NewWSConn(wsConn)
+	defer conn.Close()
 
 	ctx := context.WithValue(r.Context(), jrpcConnKey, &jrpcConn{
 		conn:   conn,

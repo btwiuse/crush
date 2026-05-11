@@ -15,7 +15,6 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/server"
-	"github.com/coder/websocket"
 )
 
 
@@ -39,7 +38,7 @@ type jrpcResponse struct {
 
 // RpcClient represents a JSON-RPC client connected to a Crush server.
 type RpcClient struct {
-	conn    *websocket.Conn
+	conn    server.MsgConn
 	wmu     sync.Mutex
 	path    string
 	network string
@@ -132,8 +131,6 @@ func (c *RpcClient) dial() error {
 	if err != nil {
 		return err
 	}
-	conn.SetReadLimit(-1)
-
 	c.conn = conn
 	go c.readLoop()
 	return nil
@@ -167,14 +164,9 @@ func (c *RpcClient) readLoop() {
 	}()
 
 	for {
-		_, msg, err := c.conn.Read(context.Background())
+		msg, err := c.conn.ReadMsg()
 		if err != nil {
-			var wsErr websocket.CloseError
-			if errors.As(err, &wsErr) {
-				slog.Debug("WebSocket closed", "code", wsErr.Code, "reason", wsErr.Reason)
-			} else {
-				slog.Debug("WebSocket read error", "error", err)
-			}
+			slog.Debug("WebSocket read error", "error", err)
 			// Cancel all pending requests.
 			c.mu.Lock()
 			for id, ch := range c.pending {
@@ -249,7 +241,7 @@ func (c *RpcClient) call(ctx context.Context, method string, params, result any)
 	}
 
 	c.wmu.Lock()
-	err := c.conn.Write(ctx, websocket.MessageText, mustMarshal(req))
+	err := c.conn.WriteMsg(server.MustMarshal(req))
 	c.wmu.Unlock()
 	if err != nil {
 		if errors.Is(err, net.ErrClosed) {
@@ -320,15 +312,8 @@ func (c *RpcClient) Close() error {
 		close(c.closed)
 	})
 	if c.conn != nil {
-		return c.conn.CloseNow()
+		return c.conn.Close()
 	}
 	return nil
 }
 
-func mustMarshal(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return b
-}
