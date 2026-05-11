@@ -586,7 +586,7 @@ func (w *ClientWorkspace) Subscribe(program boba.Program) {
 		// Update cached queued prompts from subscription events.
 		if e, ok := ev.(pubsub.Event[proto.PromptQueueEvent]); ok {
 			w.queueMu.Lock()
-			w.queuedPrompts[e.Payload.SessionID] = e.Payload.Count
+			w.queuedPrompts[e.Payload.SessionID] = len(e.Payload.Prompts)
 			w.queueMu.Unlock()
 			program.Send(e)
 			continue

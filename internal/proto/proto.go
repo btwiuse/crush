@@ -41,10 +41,9 @@ func (a AgentInfo) IsZero() bool {
 	return !a.IsBusy && !a.IsReady && a.Model.ID == ""
 }
 
-// PromptQueueEvent carries the queued prompt count and list for a session.
+// PromptQueueEvent carries the queued prompt list for a session.
 type PromptQueueEvent struct {
 	SessionID string   `json:"session_id"`
-	Count     int      `json:"count"`
 	Prompts   []string `json:"prompts,omitempty"`
 }
 

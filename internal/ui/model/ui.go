@@ -602,7 +602,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// without polling. Handled in both local and remote modes.
 			if m.session != nil && msg.Payload.SessionID == m.session.ID {
 			m.queueItems = msg.Payload.Prompts
-			m.promptQueue = msg.Payload.Count
+			m.promptQueue = len(msg.Payload.Prompts)
 			m.updateLayoutAndSize()
 		}
 

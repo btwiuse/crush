@@ -21,15 +21,12 @@ func (b *Backend) SendMessage(ctx context.Context, workspaceID string, msg proto
 	}
 
 	_, err = ws.AgentCoordinator.Run(ctx, msg.SessionID, msg.Prompt)
-
 	// Publish queue state so the UI cache stays up to date.
-	if count, qErr := b.QueuedPrompts(workspaceID, msg.SessionID); qErr == nil {
-		prompts, _ := b.QueuedPromptsList(workspaceID, msg.SessionID)
+	if prompts, qErr := b.QueuedPromptsList(workspaceID, msg.SessionID); qErr == nil {
 		ws.App.SendEvent(pubsub.Event[proto.PromptQueueEvent]{
 			Type: pubsub.UpdatedEvent,
 			Payload: proto.PromptQueueEvent{
 				SessionID: msg.SessionID,
-				Count:     count,
 				Prompts:   prompts,
 			},
 		})
@@ -136,7 +133,6 @@ func (b *Backend) ClearQueue(workspaceID, sessionID string) error {
 		Type: pubsub.UpdatedEvent,
 		Payload: proto.PromptQueueEvent{
 			SessionID: sessionID,
-			Count:     0,
 		},
 	})
 	return nil
