@@ -14,6 +14,8 @@ import (
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/config"
+	_ "github.com/charmbracelet/crush/internal/swagger"
+	httpswagger "github.com/swaggo/http-swagger/v2"
 )
 
 // ErrServerClosed is returned when the server is closed.
@@ -109,12 +111,10 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	s.jrpc = make(jrpcRouter)
 	s.registerRPCHandlers(s.jrpc)
 
-	// Register HTTP REST handlers.
-	c := &controllerV1{backend: s.backend, server: s}
-
 	var p http.Protocols
 	p.SetHTTP1(true)
 	p.SetUnencryptedHTTP2(true)
+	c := &controllerV1{backend: s.backend, server: s}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", c.handleGetHealth)
 	mux.HandleFunc("GET /v1/version", c.handleGetVersion)
@@ -176,6 +176,7 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/enable", c.handlePostWorkspaceMCPEnableDocker)
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/disable", c.handlePostWorkspaceMCPDisableDocker)
 	mux.HandleFunc("GET /v1/rpc", s.handleWebSocket)
+	mux.Handle("/v1/docs/", httpswagger.WrapHandler)
 	s.h = &http.Server{
 		Protocols: &p,
 		Handler:   s.loggingHandler(mux),
