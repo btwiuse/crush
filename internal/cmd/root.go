@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -205,6 +206,9 @@ func supportsProgressBar() bool {
 // useClientServer returns true when the client/server architecture is
 // enabled via the CRUSH_CLIENT_SERVER environment variable.
 func useClientServer() bool {
+	if runtime.GOOS == "js" && runtime.GOARCH == "wasm" {
+		return true
+	}
 	v, _ := strconv.ParseBool(os.Getenv("CRUSH_CLIENT_SERVER"))
 	return v
 }
