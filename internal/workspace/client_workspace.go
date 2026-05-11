@@ -33,7 +33,7 @@ import (
 // cached from subscription events to avoid polling RPCs on every
 // TUI render frame.
 type ClientWorkspace struct {
-	client *client.Client
+	client client.ServerClient
 
 	mu sync.RWMutex
 	ws proto.Workspace
@@ -51,7 +51,7 @@ type ClientWorkspace struct {
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
 // operations through the given client SDK. The ws parameter is the
 // proto.Workspace snapshot returned by the server at creation time.
-func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
+func NewClientWorkspace(c client.ServerClient, ws proto.Workspace) *ClientWorkspace {
 	if ws.Config != nil {
 		ws.Config.SetupAgents()
 	}

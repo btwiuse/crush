@@ -157,7 +157,7 @@ func init() {
 // to stdout.
 func runNonInteractive(
 	ctx context.Context,
-	c *client.Client,
+	c client.ServerClient,
 	ws *proto.Workspace,
 	prompt, largeModel, smallModel string,
 	hideSpinner bool,
@@ -316,7 +316,7 @@ func runNonInteractive(
 
 // waitForAgent polls GetAgentInfo until the agent is ready, with a
 // timeout.
-func waitForAgent(ctx context.Context, c *client.Client, wsID string) error {
+func waitForAgent(ctx context.Context, c client.ServerClient, wsID string) error {
 	timeout := time.After(30 * time.Second)
 	for {
 		info, err := c.GetAgentInfo(ctx, wsID)
@@ -340,7 +340,7 @@ func waitForAgent(ctx context.Context, c *client.Client, wsID string) error {
 // configuration via the server.
 func overrideModels(
 	ctx context.Context,
-	c *client.Client,
+	c client.ServerClient,
 	ws *proto.Workspace,
 	largeModel, smallModel string,
 ) error {
@@ -472,7 +472,7 @@ func validateModelMatches(matches []modelMatch, modelID, label string) (modelMat
 // If continueSessionID is set it fetches that session; if useLast is set it
 // returns the most recently updated top-level session; otherwise it creates a
 // new one.
-func resolveSession(ctx context.Context, c *client.Client, wsID, continueSessionID string, useLast bool) (*proto.Session, error) {
+func resolveSession(ctx context.Context, c client.ServerClient, wsID, continueSessionID string, useLast bool) (*proto.Session, error) {
 	switch {
 	case continueSessionID != "":
 		sess, err := c.GetSession(ctx, wsID, continueSessionID)
@@ -504,7 +504,7 @@ func resolveSession(ctx context.Context, c *client.Client, wsID, continueSession
 
 // resolveSessionByID resolves a session ID that may be a full UUID or a hash
 // prefix returned by crush session list.
-func resolveSessionByID(ctx context.Context, c *client.Client, wsID, id string) (*proto.Session, error) {
+func resolveSessionByID(ctx context.Context, c client.ServerClient, wsID, id string) (*proto.Session, error) {
 	if sess, err := c.GetSession(ctx, wsID, id); err == nil {
 		return sess, nil
 	}
