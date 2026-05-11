@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/history"
+	jrpc "github.com/charmbracelet/crush/internal/jsonrpc"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
@@ -29,24 +30,72 @@ import (
 // operations to a remote server via the client SDK. It caches the
 // proto.Workspace returned at creation time and refreshes it after
 // config-mutating operations.
+//
+// It also maintains a persistent WebSocket connection (wsClient) for
+// event push and to serve the high-frequency polling methods
+// (AgentIsReady, AgentIsBusy, AgentModel, AgentQueuedPrompts,
+// PermissionSkipRequests) from a short-lived local cache, eliminating
+// per-render-frame HTTP requests.
 type ClientWorkspace struct {
-	client *client.Client
+	client   *client.Client
+	wsClient *client.WSClient
 
 	mu sync.RWMutex
 	ws proto.Workspace
+
+	// Agent info cache — refreshed via WSClient, shared across
+	// AgentIsReady/AgentIsBusy/AgentModel to avoid triple HTTP calls
+	// per UI frame.
+	agentInfoMu       sync.RWMutex
+	cachedAgentInfo   proto.AgentInfo
+	cachedAgentInfoAt time.Time
+
+	// Permission-skip cache.
+	permSkipMu       sync.RWMutex
+	cachedPermSkip   bool
+	cachedPermSkipAt time.Time
+
+	// Queued-prompts cache keyed by sessionID.
+	queuedMu     sync.RWMutex
+	cachedQueued map[string]cachedQueuedEntry
 }
+
+type cachedQueuedEntry struct {
+	count int
+	list  []string
+	at    time.Time
+}
+
+// agentCacheTTL is the maximum age of the cached AgentInfo before
+// re-fetching. It is intentionally short so that the cache stays
+// fresh across a render cycle while avoiding per-frame HTTP requests.
+const agentCacheTTL = 100 * time.Millisecond
 
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
 // operations through the given client SDK. The ws parameter is the
 // proto.Workspace snapshot returned by the server at creation time.
+//
+// It also attempts to establish a WebSocket connection for efficient
+// event streaming and state caching. If the connection fails, the
+// workspace continues to work using HTTP-only transport.
 func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
 	if ws.Config != nil {
 		ws.Config.SetupAgents()
 	}
-	return &ClientWorkspace{
-		client: c,
-		ws:     ws,
+	cw := &ClientWorkspace{
+		client:       c,
+		ws:           ws,
+		cachedQueued: make(map[string]cachedQueuedEntry),
 	}
+	// Best-effort WebSocket connection; fall back to HTTP if it fails.
+	wsc, err := client.NewWSClient(c.Network(), c.Addr())
+	if err != nil {
+		slog.Warn("Failed to connect WebSocket client, falling back to HTTP",
+			"workspace", ws.ID, "error", err)
+	} else {
+		cw.wsClient = wsc
+	}
+	return cw
 }
 
 // refreshWorkspace re-fetches the workspace from the server, updating
@@ -159,6 +208,40 @@ func (w *ClientWorkspace) ListAllUserMessages(ctx context.Context) ([]message.Me
 
 // -- Agent --
 
+// agentInfo returns the cached AgentInfo, refreshing it via WebSocket
+// if the cache has expired. All three AgentIsReady / AgentIsBusy /
+// AgentModel callers share the same cached value so we pay at most one
+// network round-trip per cache TTL window.
+//
+// The GET /v1/workspaces/{id}/agent HTTP endpoint has been removed;
+// this method requires a live WSClient.
+func (w *ClientWorkspace) agentInfo() proto.AgentInfo {
+	w.agentInfoMu.RLock()
+	if time.Since(w.cachedAgentInfoAt) < agentCacheTTL {
+		info := w.cachedAgentInfo
+		w.agentInfoMu.RUnlock()
+		return info
+	}
+	w.agentInfoMu.RUnlock()
+
+	// Re-fetch via WebSocket.
+	var info proto.AgentInfo
+	if w.wsClient == nil {
+		slog.Debug("WSClient unavailable for agent.info", "workspace", w.workspaceID())
+		return info
+	}
+	params := map[string]string{"id": w.workspaceID()}
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodAgentInfo, params, &info); err != nil {
+		slog.Debug("WSClient agent.info failed", "workspace", w.workspaceID(), "error", err)
+	}
+
+	w.agentInfoMu.Lock()
+	w.cachedAgentInfo = info
+	w.cachedAgentInfoAt = time.Now()
+	w.agentInfoMu.Unlock()
+	return info
+}
+
 func (w *ClientWorkspace) AgentRun(ctx context.Context, sessionID, prompt string, attachments ...message.Attachment) error {
 	return w.client.SendMessage(ctx, w.workspaceID(), sessionID, prompt, attachments...)
 }
@@ -168,11 +251,7 @@ func (w *ClientWorkspace) AgentCancel(sessionID string) {
 }
 
 func (w *ClientWorkspace) AgentIsBusy() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsBusy
+	return w.agentInfo().IsBusy
 }
 
 func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
@@ -184,10 +263,7 @@ func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
 }
 
 func (w *ClientWorkspace) AgentModel() AgentModel {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return AgentModel{}
-	}
+	info := w.agentInfo()
 	return AgentModel{
 		CatwalkCfg: info.Model,
 		ModelCfg:   info.ModelCfg,
@@ -195,26 +271,64 @@ func (w *ClientWorkspace) AgentModel() AgentModel {
 }
 
 func (w *ClientWorkspace) AgentIsReady() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsReady
+	return w.agentInfo().IsReady
 }
 
 func (w *ClientWorkspace) AgentQueuedPrompts(sessionID string) int {
-	count, err := w.client.GetAgentSessionQueuedPrompts(context.Background(), w.workspaceID(), sessionID)
-	if err != nil {
+	w.queuedMu.RLock()
+	e, ok := w.cachedQueued[sessionID]
+	if ok && time.Since(e.at) < agentCacheTTL {
+		count := e.count
+		w.queuedMu.RUnlock()
+		return count
+	}
+	w.queuedMu.RUnlock()
+
+	// GET /v1/.../prompts/queued removed; use WebSocket.
+	if w.wsClient == nil {
 		return 0
 	}
+	params := map[string]string{"id": w.workspaceID(), "session_id": sessionID}
+	var count int
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodAgentQueuedCount, params, &count); err != nil {
+		slog.Debug("WSClient agent.queue.count failed", "workspace", w.workspaceID(), "error", err)
+		return 0
+	}
+	w.queuedMu.Lock()
+	entry := w.cachedQueued[sessionID]
+	entry.count = count
+	entry.at = time.Now()
+	w.cachedQueued[sessionID] = entry
+	w.queuedMu.Unlock()
 	return count
 }
 
 func (w *ClientWorkspace) AgentQueuedPromptsList(sessionID string) []string {
-	prompts, err := w.client.GetAgentSessionQueuedPromptsList(context.Background(), w.workspaceID(), sessionID)
-	if err != nil {
+	w.queuedMu.RLock()
+	e, ok := w.cachedQueued[sessionID]
+	if ok && time.Since(e.at) < agentCacheTTL {
+		list := e.list
+		w.queuedMu.RUnlock()
+		return list
+	}
+	w.queuedMu.RUnlock()
+
+	// GET /v1/.../prompts/list removed; use WebSocket.
+	if w.wsClient == nil {
 		return nil
 	}
+	params := map[string]string{"id": w.workspaceID(), "session_id": sessionID}
+	var prompts []string
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodAgentQueuedList, params, &prompts); err != nil {
+		slog.Debug("WSClient agent.queue.list failed", "workspace", w.workspaceID(), "error", err)
+		return nil
+	}
+	w.queuedMu.Lock()
+	entry := w.cachedQueued[sessionID]
+	entry.list = prompts
+	entry.at = time.Now()
+	w.cachedQueued[sessionID] = entry
+	w.queuedMu.Unlock()
 	return prompts
 }
 
@@ -293,10 +407,28 @@ func (w *ClientWorkspace) PermissionDeny(perm permission.PermissionRequest) {
 }
 
 func (w *ClientWorkspace) PermissionSkipRequests() bool {
-	skip, err := w.client.GetPermissionsSkipRequests(context.Background(), w.workspaceID())
-	if err != nil {
+	w.permSkipMu.RLock()
+	if time.Since(w.cachedPermSkipAt) < agentCacheTTL {
+		v := w.cachedPermSkip
+		w.permSkipMu.RUnlock()
+		return v
+	}
+	w.permSkipMu.RUnlock()
+
+	// GET /v1/.../permissions/skip removed; use WebSocket.
+	if w.wsClient == nil {
 		return false
 	}
+	params := map[string]string{"id": w.workspaceID()}
+	var skip bool
+	if err := w.wsClient.Call(context.Background(), jrpc.MethodPermissionsGetSkip, params, &skip); err != nil {
+		slog.Debug("WSClient permissions.get_skip failed", "workspace", w.workspaceID(), "error", err)
+		return false
+	}
+	w.permSkipMu.Lock()
+	w.cachedPermSkip = skip
+	w.cachedPermSkipAt = time.Now()
+	w.permSkipMu.Unlock()
 	return skip
 }
 
@@ -545,13 +677,25 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 		program.Quit()
 	})
 
-	evc, err := w.client.SubscribeEvents(context.Background(), w.workspaceID())
+	// GET /v1/workspaces/{id}/events (SSE) has been removed.
+	// All events are delivered over the persistent WebSocket connection.
+	if w.wsClient == nil {
+		slog.Error("WSClient unavailable; cannot subscribe to events",
+			"workspace", w.workspaceID())
+		return
+	}
+
+	evc, err := w.wsClient.SubscribeEvents(context.Background(), w.workspaceID())
 	if err != nil {
-		slog.Error("Failed to subscribe to events", "error", err)
+		slog.Error("WSClient event subscription failed",
+			"workspace", w.workspaceID(), "error", err)
 		return
 	}
 
 	for ev := range evc {
+		// Invalidate caches when agent-state-bearing events arrive.
+		w.invalidateCachesOnEvent(ev)
+
 		translated := translateEvent(ev)
 		if translated != nil {
 			program.Send(translated)
@@ -559,7 +703,27 @@ func (w *ClientWorkspace) Subscribe(program *tea.Program) {
 	}
 }
 
+// invalidateCachesOnEvent resets the TTL-based caches when an event
+// that might change agent or permission state arrives.
+func (w *ClientWorkspace) invalidateCachesOnEvent(ev any) {
+	switch ev.(type) {
+	case pubsub.Event[proto.AgentEvent]:
+		// Agent state may have changed; reset the agent info cache so the
+		// next call re-fetches.
+		w.agentInfoMu.Lock()
+		w.cachedAgentInfoAt = time.Time{}
+		w.agentInfoMu.Unlock()
+	case pubsub.Event[proto.PermissionNotification]:
+		w.permSkipMu.Lock()
+		w.cachedPermSkipAt = time.Time{}
+		w.permSkipMu.Unlock()
+	}
+}
+
 func (w *ClientWorkspace) Shutdown() {
+	if w.wsClient != nil {
+		_ = w.wsClient.Close()
+	}
 	_ = w.client.DeleteWorkspace(context.Background(), w.workspaceID())
 }
 
