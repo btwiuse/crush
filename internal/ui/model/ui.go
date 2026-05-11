@@ -37,6 +37,7 @@ import (
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
@@ -261,6 +262,7 @@ type UI struct {
 	pillsExpanded      bool
 	focusedPillSection pillSection
 	promptQueue        int
+	queueItems         []string // cached from PromptQueueEvent push
 	pillsView          string
 
 	// Cached agent state to avoid synchronous network calls in the UI
@@ -498,14 +500,6 @@ func (m *UI) loadMCPrompts() tea.Msg {
 func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	// Update prompt queue size from the workspace.
-	if m.hasSession() && m.isAgentBusy() {
-		if queueSize := m.com.Workspace.AgentQueuedPrompts(m.session.ID); queueSize != m.promptQueue {
-			m.promptQueue = queueSize
-			m.updateLayoutAndSize()
-		}
-	}
-
 	// Update terminal capabilities
 	m.caps.Update(msg)
 	switch msg := msg.(type) {
@@ -602,6 +596,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case closeDialogMsg:
 		m.dialog.CloseFrontDialog()
+
+	case pubsub.Event[proto.PromptQueueEvent]:
+		// Server-pushed queue count and list — drives the "N Queued" indicator
+		// without polling. Handled in both local and remote modes.
+			if m.session != nil && msg.Payload.SessionID == m.session.ID {
+			m.queueItems = msg.Payload.Prompts
+			m.promptQueue = msg.Payload.Count
+			m.updateLayoutAndSize()
+		}
 
 	case pubsub.Event[session.Session]:
 		if msg.Type == pubsub.DeletedEvent {

@@ -24,11 +24,13 @@ func (b *Backend) SendMessage(ctx context.Context, workspaceID string, msg proto
 
 	// Publish queue state so the UI cache stays up to date.
 	if count, qErr := b.QueuedPrompts(workspaceID, msg.SessionID); qErr == nil {
+		prompts, _ := b.QueuedPromptsList(workspaceID, msg.SessionID)
 		ws.App.SendEvent(pubsub.Event[proto.PromptQueueEvent]{
 			Type: pubsub.UpdatedEvent,
 			Payload: proto.PromptQueueEvent{
 				SessionID: msg.SessionID,
 				Count:     count,
+				Prompts:   prompts,
 			},
 		})
 	}
@@ -128,6 +130,15 @@ func (b *Backend) ClearQueue(workspaceID, sessionID string) error {
 	if ws.AgentCoordinator != nil {
 		ws.AgentCoordinator.ClearQueue(sessionID)
 	}
+
+	// Publish cleared queue state so the UI cache updates immediately.
+	ws.App.SendEvent(pubsub.Event[proto.PromptQueueEvent]{
+		Type: pubsub.UpdatedEvent,
+		Payload: proto.PromptQueueEvent{
+			SessionID: sessionID,
+			Count:     0,
+		},
+	})
 	return nil
 }
 

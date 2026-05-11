@@ -588,6 +588,7 @@ func (w *ClientWorkspace) Subscribe(program boba.Program) {
 			w.queueMu.Lock()
 			w.queuedPrompts[e.Payload.SessionID] = e.Payload.Count
 			w.queueMu.Unlock()
+			program.Send(e)
 			continue
 		}
 		translated := translateEvent(ev)
