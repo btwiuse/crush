@@ -73,10 +73,20 @@ func ctxErr(ctx context.Context) error {
 
 // ---------- path helpers ----------
 
-// sanitizeComponent strips directory separators and null bytes from a string
-// that will be used as a filesystem path component, preventing path traversal.
+// sanitizeComponent removes characters that could be used for path traversal
+// from a string that will be used as a single filesystem path component.
+// Valid IDs (UUIDs, hex strings) are unaffected by this operation.
 func sanitizeComponent(s string) string {
-	return filepath.Base(strings.ReplaceAll(strings.ReplaceAll(s, "\x00", ""), "..", ""))
+	var out strings.Builder
+	for _, r := range s {
+		switch r {
+		case '/', '\\', 0:
+			// Skip path separators and null bytes.
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
 func (q *FSQuerier) sessionPath(id string) string {
@@ -100,16 +110,26 @@ func (q *FSQuerier) readFilePath(sessionID, path string) string {
 
 // ---------- generic JSON helpers (no lock) ----------
 
-func readJSONFile(path string, v any) error {
-	data, err := os.ReadFile(path)
+// readJSON reads and unmarshals a JSON file at path.
+// It returns an error if path is outside the data directory.
+func (q *FSQuerier) readJSON(path string, v any) error {
+	if !q.withinDataDir(path) {
+		return fmt.Errorf("path %q is outside data directory", path)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(data, v)
 }
 
-func writeJSONFile(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+// writeJSON atomically writes v as JSON to path.
+// It returns an error if path is outside the data directory.
+func (q *FSQuerier) writeJSON(path string, v any) error {
+	if !q.withinDataDir(path) {
+		return fmt.Errorf("path %q is outside data directory", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil { //nolint:gosec
 		return err
 	}
 	data, err := json.Marshal(v)
@@ -117,17 +137,23 @@ func writeJSONFile(path string, v any) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil { //nolint:gosec
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// withinDataDir reports whether path is within the querier's data directory.
+func (q *FSQuerier) withinDataDir(path string) bool {
+	root := filepath.Clean(q.dataDir) + string(filepath.Separator)
+	return strings.HasPrefix(filepath.Clean(path)+string(filepath.Separator), root)
 }
 
 // ---------- internal helpers (called with lock already held) ----------
 
 func (q *FSQuerier) readSessionNoLock(id string) (Session, error) {
 	var s Session
-	if err := readJSONFile(q.sessionPath(id), &s); err != nil {
+	if err := q.readJSON(q.sessionPath(id), &s); err != nil {
 		if os.IsNotExist(err) {
 			return Session{}, sql.ErrNoRows
 		}
@@ -137,7 +163,7 @@ func (q *FSQuerier) readSessionNoLock(id string) (Session, error) {
 }
 
 func (q *FSQuerier) writeSessionNoLock(s Session) error {
-	return writeJSONFile(q.sessionPath(s.ID), s)
+	return q.writeJSON(q.sessionPath(s.ID), s)
 }
 
 func (q *FSQuerier) listAllSessionsNoLock() ([]Session, error) {
@@ -155,7 +181,7 @@ func (q *FSQuerier) listAllSessionsNoLock() ([]Session, error) {
 			continue
 		}
 		var s Session
-		if err := readJSONFile(filepath.Join(dir, e.Name()), &s); err != nil {
+		if err := q.readJSON(filepath.Join(dir, e.Name()), &s); err != nil {
 			continue
 		}
 		sessions = append(sessions, s)
@@ -165,7 +191,7 @@ func (q *FSQuerier) listAllSessionsNoLock() ([]Session, error) {
 
 func (q *FSQuerier) readMessageNoLock(sessionID, id string) (Message, error) {
 	var rec messageRecord
-	if err := readJSONFile(q.messagePath(sessionID, id), &rec); err != nil {
+	if err := q.readJSON(q.messagePath(sessionID, id), &rec); err != nil {
 		if os.IsNotExist(err) {
 			return Message{}, sql.ErrNoRows
 		}
@@ -193,7 +219,7 @@ func (q *FSQuerier) listMessagesForSessionNoLock(sessionID string) ([]Message, e
 			continue
 		}
 		var rec messageRecord
-		if err := readJSONFile(filepath.Join(dir, e.Name()), &rec); err != nil {
+		if err := q.readJSON(filepath.Join(dir, e.Name()), &rec); err != nil {
 			continue
 		}
 		records = append(records, seqMsg{msg: rec.Message, seq: rec.Seq})
@@ -236,7 +262,7 @@ func (q *FSQuerier) listAllMessagesNoLock() ([]Message, error) {
 
 func (q *FSQuerier) readFileNoLock(id string) (File, error) {
 	var f File
-	if err := readJSONFile(q.filePath(id), &f); err != nil {
+	if err := q.readJSON(q.filePath(id), &f); err != nil {
 		if os.IsNotExist(err) {
 			return File{}, sql.ErrNoRows
 		}
@@ -260,7 +286,7 @@ func (q *FSQuerier) listAllFilesNoLock() ([]File, error) {
 			continue
 		}
 		var f File
-		if err := readJSONFile(filepath.Join(dir, e.Name()), &f); err != nil {
+		if err := q.readJSON(filepath.Join(dir, e.Name()), &f); err != nil {
 			continue
 		}
 		files = append(files, f)
@@ -283,7 +309,7 @@ func (q *FSQuerier) listReadFilesForSessionNoLock(sessionID string) ([]ReadFile,
 			continue
 		}
 		var rf ReadFile
-		if err := readJSONFile(filepath.Join(dir, e.Name()), &rf); err != nil {
+		if err := q.readJSON(filepath.Join(dir, e.Name()), &rf); err != nil {
 			continue
 		}
 		result = append(result, rf)
@@ -462,7 +488,7 @@ func (q *FSQuerier) CreateMessage(ctx context.Context, arg CreateMessageParams) 
 	}
 
 	rec := messageRecord{Message: m, Seq: q.seq}
-	if err := writeJSONFile(q.messagePath(arg.SessionID, arg.ID), rec); err != nil {
+	if err := q.writeJSON(q.messagePath(arg.SessionID, arg.ID), rec); err != nil {
 		return Message{}, err
 	}
 
@@ -650,13 +676,13 @@ func (q *FSQuerier) UpdateMessage(ctx context.Context, arg UpdateMessageParams) 
 			continue
 		}
 		var rec messageRecord
-		if readErr := readJSONFile(q.messagePath(e.Name(), arg.ID), &rec); readErr != nil {
+		if readErr := q.readJSON(q.messagePath(e.Name(), arg.ID), &rec); readErr != nil {
 			continue
 		}
 		rec.Message.Parts = arg.Parts
 		rec.Message.FinishedAt = arg.FinishedAt
 		rec.Message.UpdatedAt = time.Now().Unix()
-		return writeJSONFile(q.messagePath(e.Name(), arg.ID), rec)
+		return q.writeJSON(q.messagePath(e.Name(), arg.ID), rec)
 	}
 	return sql.ErrNoRows
 }
@@ -678,7 +704,7 @@ func (q *FSQuerier) CreateFile(ctx context.Context, arg CreateFileParams) (File,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := writeJSONFile(q.filePath(arg.ID), f); err != nil {
+	if err := q.writeJSON(q.filePath(arg.ID), f); err != nil {
 		return File{}, err
 	}
 	return f, nil
@@ -853,7 +879,7 @@ func (q *FSQuerier) GetFileRead(ctx context.Context, arg GetFileReadParams) (Rea
 	defer q.mu.RUnlock()
 
 	var rf ReadFile
-	if err := readJSONFile(q.readFilePath(arg.SessionID, arg.Path), &rf); err != nil {
+	if err := q.readJSON(q.readFilePath(arg.SessionID, arg.Path), &rf); err != nil {
 		if os.IsNotExist(err) {
 			return ReadFile{}, sql.ErrNoRows
 		}
@@ -887,7 +913,7 @@ func (q *FSQuerier) RecordFileRead(ctx context.Context, arg RecordFileReadParams
 		Path:      arg.Path,
 		ReadAt:    time.Now().Unix(),
 	}
-	return writeJSONFile(q.readFilePath(arg.SessionID, arg.Path), rf)
+	return q.writeJSON(q.readFilePath(arg.SessionID, arg.Path), rf)
 }
 
 // ---------- Stats methods ----------
