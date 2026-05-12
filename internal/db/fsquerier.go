@@ -73,21 +73,29 @@ func ctxErr(ctx context.Context) error {
 
 // ---------- path helpers ----------
 
+// sanitizeComponent strips directory separators and null bytes from a string
+// that will be used as a filesystem path component, preventing path traversal.
+func sanitizeComponent(s string) string {
+	return filepath.Base(strings.ReplaceAll(strings.ReplaceAll(s, "\x00", ""), "..", ""))
+}
+
 func (q *FSQuerier) sessionPath(id string) string {
-	return filepath.Join(q.dataDir, "sessions", id+".json")
+	return filepath.Join(q.dataDir, "sessions", sanitizeComponent(id)+".json")
 }
 
 func (q *FSQuerier) messagePath(sessionID, id string) string {
-	return filepath.Join(q.dataDir, "messages", sessionID, id+".json")
+	return filepath.Join(q.dataDir, "messages", sanitizeComponent(sessionID), sanitizeComponent(id)+".json")
 }
 
 func (q *FSQuerier) filePath(id string) string {
-	return filepath.Join(q.dataDir, "files", id+".json")
+	return filepath.Join(q.dataDir, "files", sanitizeComponent(id)+".json")
 }
 
 func (q *FSQuerier) readFilePath(sessionID, path string) string {
+	// path is hex-encoded so only [0-9a-f] characters appear in the filename;
+	// sessionID is sanitized against traversal.
 	encoded := hex.EncodeToString([]byte(path))
-	return filepath.Join(q.dataDir, "read_files", sessionID, encoded+".json")
+	return filepath.Join(q.dataDir, "read_files", sanitizeComponent(sessionID), encoded+".json")
 }
 
 // ---------- generic JSON helpers (no lock) ----------
@@ -993,7 +1001,9 @@ func (q *FSQuerier) GetRecentActivity(ctx context.Context) ([]GetRecentActivityR
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].Day.(string) < rows[j].Day.(string)
+		di, _ := rows[i].Day.(string)
+		dj, _ := rows[j].Day.(string)
+		return di < dj
 	})
 	return rows, nil
 }
@@ -1130,7 +1140,9 @@ func (q *FSQuerier) GetUsageByDay(ctx context.Context) ([]GetUsageByDayRow, erro
 		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].Day.(string) > rows[j].Day.(string)
+		di, _ := rows[i].Day.(string)
+		dj, _ := rows[j].Day.(string)
+		return di > dj
 	})
 	return rows, nil
 }
