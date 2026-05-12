@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
+	"github.com/charmbracelet/crush/internal/pubsub"
 )
 
 // SendMessage sends a prompt to the agent coordinator for the given
@@ -20,6 +21,17 @@ func (b *Backend) SendMessage(ctx context.Context, workspaceID string, msg proto
 	}
 
 	_, err = ws.AgentCoordinator.Run(ctx, msg.SessionID, msg.Prompt)
+	// Publish queue state so the UI cache stays up to date.
+	if prompts, qErr := b.QueuedPromptsList(workspaceID, msg.SessionID); qErr == nil {
+		ws.App.SendEvent(pubsub.Event[proto.PromptQueueEvent]{
+			Type: pubsub.UpdatedEvent,
+			Payload: proto.PromptQueueEvent{
+				SessionID: msg.SessionID,
+				Prompts:   prompts,
+			},
+		})
+	}
+
 	return err
 }
 
@@ -60,7 +72,20 @@ func (b *Backend) UpdateAgent(ctx context.Context, workspaceID string) error {
 		return err
 	}
 
-	return ws.UpdateAgentModel(ctx)
+	if err := ws.UpdateAgentModel(ctx); err != nil {
+		return err
+	}
+
+	// Publish updated agent info so the TUI cache stays up to date in
+	// client/server mode.
+	if info, err := b.GetAgentInfo(workspaceID); err == nil {
+		ws.App.SendEvent(pubsub.Event[proto.AgentInfo]{
+			Type:    pubsub.UpdatedEvent,
+			Payload: info,
+		})
+	}
+
+	return nil
 }
 
 // CancelSession cancels an ongoing agent operation for the given
@@ -115,6 +140,14 @@ func (b *Backend) ClearQueue(workspaceID, sessionID string) error {
 	if ws.AgentCoordinator != nil {
 		ws.AgentCoordinator.ClearQueue(sessionID)
 	}
+
+	// Publish cleared queue state so the UI cache updates immediately.
+	ws.App.SendEvent(pubsub.Event[proto.PromptQueueEvent]{
+		Type: pubsub.UpdatedEvent,
+		Payload: proto.PromptQueueEvent{
+			SessionID: sessionID,
+		},
+	})
 	return nil
 }
 

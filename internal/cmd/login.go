@@ -68,7 +68,7 @@ crush login copilot
 	},
 }
 
-func loginHyper(c *client.Client, wsID string) error {
+func loginHyper(c client.ServerClient, wsID string) error {
 	ctx := getLoginContext()
 
 	resp, err := hyper.InitiateDeviceAuth(ctx)
@@ -127,7 +127,7 @@ func loginHyper(c *client.Client, wsID string) error {
 	return nil
 }
 
-func loginCopilot(ctx context.Context, c *client.Client, wsID string) error {
+func loginCopilot(ctx context.Context, c client.ServerClient, wsID string) error {
 	loginCtx := getLoginContext()
 
 	cfg, err := c.GetConfig(ctx, wsID)

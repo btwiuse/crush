@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/user"
 	"runtime"
 	"strings"
@@ -45,6 +46,9 @@ func ParseHostURL(host string) (*url.URL, error) {
 
 // DefaultHost returns the default server host.
 func DefaultHost() string {
+        if h := os.Getenv("CRUSH_HOST"); h != "" {
+                return h
+        }
 	sock := "crush.sock"
 	usr, err := user.Current()
 	if err == nil && usr.Uid != "" {
@@ -67,6 +71,8 @@ type Server struct {
 
 	backend *backend.Backend
 	logger  *slog.Logger
+
+	jrpc jrpcRouter
 }
 
 // SetLogger sets the logger for the server.
@@ -100,6 +106,10 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 			}
 		}()
 	})
+
+	// Register JSON-RPC handlers.
+	s.jrpc = make(jrpcRouter)
+	s.registerRPCHandlers(s.jrpc)
 
 	var p http.Protocols
 	p.SetHTTP1(true)
@@ -165,6 +175,7 @@ func NewServer(cfg *config.ConfigStore, network, address string) *Server {
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/refresh-resources", c.handlePostWorkspaceMCPRefreshResources)
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/enable", c.handlePostWorkspaceMCPEnableDocker)
 	mux.HandleFunc("POST /v1/workspaces/{id}/mcp/docker/disable", c.handlePostWorkspaceMCPDisableDocker)
+	mux.HandleFunc("GET /v1/rpc", s.handleWebSocket)
 	mux.Handle("/v1/docs/", httpswagger.WrapHandler)
 	s.h = &http.Server{
 		Protocols: &p,
@@ -232,3 +243,4 @@ func (s *Server) logError(r *http.Request, msg string, args ...any) {
 		).Error(msg, args...)
 	}
 }
+

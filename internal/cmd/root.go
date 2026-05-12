@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -205,6 +206,9 @@ func supportsProgressBar() bool {
 // useClientServer returns true when the client/server architecture is
 // enabled via the CRUSH_CLIENT_SERVER environment variable.
 func useClientServer() bool {
+	if runtime.GOOS == "js" && runtime.GOARCH == "wasm" {
+		return true
+	}
 	v, _ := strconv.ParseBool(os.Getenv("CRUSH_CLIENT_SERVER"))
 	return v
 }
@@ -313,12 +317,16 @@ func setupClientServerWorkspace(cmd *cobra.Command) (workspace.Workspace, func()
 		}
 	}
 
+	// Populate agent state cache with a one-time RPC so reads
+	// work before the event subscription starts flowing.
+	clientWs.SyncAgentState(cmd.Context())
+
 	return clientWs, cleanupServer, nil
 }
 
 // connectToServer ensures the server is running, creates a client and
 // workspace, and returns a cleanup function that deletes the workspace.
-func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func(), error) {
+func connectToServer(cmd *cobra.Command) (client.ServerClient, *proto.Workspace, func(), error) {
 	hostURL, err := server.ParseHostURL(clientHost)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("invalid host URL: %v", err)
@@ -338,7 +346,7 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 		return nil, nil, nil, err
 	}
 
-	c, err := client.NewClient(cwd, hostURL.Scheme, hostURL.Host)
+	c, err := client.NewRpcClient(cwd, hostURL.Scheme, hostURL.Host)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -514,6 +522,9 @@ func startDetachedServer(cmd *cobra.Command) error {
 }
 
 func shouldEnableMetrics(cfg *config.Config) bool {
+	if runtime.GOOS == "js" && runtime.GOARCH == "wasm" {
+		return false
+	}
 	if v, _ := strconv.ParseBool(os.Getenv("CRUSH_DISABLE_METRICS")); v {
 		return false
 	}
@@ -578,6 +589,11 @@ func resolveWorkspaceSessionID(ctx context.Context, ws workspace.Workspace, id s
 }
 
 func ResolveCwd(cmd *cobra.Command) (string, error) {
+	if v := os.Getenv("CRUSH_CWD"); v != "" {
+		return v, nil
+	} else {
+		return ".", nil
+	}
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd != "" {
 		err := os.Chdir(cwd)

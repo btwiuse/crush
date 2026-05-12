@@ -29,24 +29,36 @@ import (
 // ClientWorkspace implements the Workspace interface by delegating all
 // operations to a remote server via the client SDK. It caches the
 // proto.Workspace returned at creation time and refreshes it after
-// config-mutating operations.
+// config-mutating operations. Agent state (model, busy, ready) is
+// cached from subscription events to avoid polling RPCs on every
+// TUI render frame.
 type ClientWorkspace struct {
-	client *client.Client
+	client client.ServerClient
 
 	mu sync.RWMutex
 	ws proto.Workspace
+
+	agentMu      sync.RWMutex
+	agentModel   AgentModel
+	agentBusy    bool
+	agentReady   bool
+	agentSynced  bool // set after initial sync or first subscribe event
+
+	queueMu       sync.RWMutex
+	queuedPrompts map[string]int // sessionID → queued count, updated from subscription events
 }
 
 // NewClientWorkspace creates a new ClientWorkspace that proxies all
 // operations through the given client SDK. The ws parameter is the
 // proto.Workspace snapshot returned by the server at creation time.
-func NewClientWorkspace(c *client.Client, ws proto.Workspace) *ClientWorkspace {
+func NewClientWorkspace(c client.ServerClient, ws proto.Workspace) *ClientWorkspace {
 	if ws.Config != nil {
 		ws.Config.SetupAgents()
 	}
 	return &ClientWorkspace{
 		client: c,
-		ws:     ws,
+		ws:            ws,
+		queuedPrompts: make(map[string]int),
 	}
 }
 
@@ -64,6 +76,25 @@ func (w *ClientWorkspace) refreshWorkspace() {
 	w.mu.Lock()
 	w.ws = *updated
 	w.mu.Unlock()
+}
+
+// syncAgentState does a one-time RPC to populate the cached agent state.
+// Called during workspace setup so the cache is available before the event
+// subscription starts flowing. Subsequent updates come via subscription.
+func (w *ClientWorkspace) SyncAgentState(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	info, err := w.client.GetAgentInfo(ctx, w.workspaceID())
+	if err != nil {
+		slog.Debug("Agent state sync failed (cache will use defaults)", "error", err)
+		return
+	}
+	w.agentMu.Lock()
+	w.agentModel = AgentModel{CatwalkCfg: info.Model, ModelCfg: info.ModelCfg}
+	w.agentBusy = info.IsBusy
+	w.agentReady = info.IsReady
+	w.agentSynced = true
+	w.agentMu.Unlock()
 }
 
 // cached returns a snapshot of the cached workspace.
@@ -169,11 +200,9 @@ func (w *ClientWorkspace) AgentCancel(sessionID string) {
 }
 
 func (w *ClientWorkspace) AgentIsBusy() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsBusy
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	return w.agentBusy
 }
 
 func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
@@ -185,30 +214,21 @@ func (w *ClientWorkspace) AgentIsSessionBusy(sessionID string) bool {
 }
 
 func (w *ClientWorkspace) AgentModel() AgentModel {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return AgentModel{}
-	}
-	return AgentModel{
-		CatwalkCfg: info.Model,
-		ModelCfg:   info.ModelCfg,
-	}
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	return w.agentModel
 }
 
 func (w *ClientWorkspace) AgentIsReady() bool {
-	info, err := w.client.GetAgentInfo(context.Background(), w.workspaceID())
-	if err != nil {
-		return false
-	}
-	return info.IsReady
+	w.agentMu.RLock()
+	defer w.agentMu.RUnlock()
+	return w.agentReady
 }
 
 func (w *ClientWorkspace) AgentQueuedPrompts(sessionID string) int {
-	count, err := w.client.GetAgentSessionQueuedPrompts(context.Background(), w.workspaceID(), sessionID)
-	if err != nil {
-		return 0
-	}
-	return count
+	w.queueMu.RLock()
+	defer w.queueMu.RUnlock()
+	return w.queuedPrompts[sessionID]
 }
 
 func (w *ClientWorkspace) AgentQueuedPromptsList(sessionID string) []string {
@@ -553,6 +573,25 @@ func (w *ClientWorkspace) Subscribe(program boba.Program) {
 	}
 
 	for ev := range evc {
+		// Update cached agent state from subscription events.
+		if e, ok := ev.(pubsub.Event[proto.AgentInfo]); ok {
+			w.agentMu.Lock()
+			w.agentModel = AgentModel{CatwalkCfg: e.Payload.Model, ModelCfg: e.Payload.ModelCfg}
+			w.agentBusy = e.Payload.IsBusy
+			w.agentReady = e.Payload.IsReady
+			w.agentSynced = true
+			w.agentMu.Unlock()
+			program.Send(e)
+			continue
+		}
+		// Update cached queued prompts from subscription events.
+		if e, ok := ev.(pubsub.Event[proto.PromptQueueEvent]); ok {
+			w.queueMu.Lock()
+			w.queuedPrompts[e.Payload.SessionID] = len(e.Payload.Prompts)
+			w.queueMu.Unlock()
+			program.Send(e)
+			continue
+		}
 		translated := translateEvent(ev)
 		if translated != nil {
 			program.Send(translated)

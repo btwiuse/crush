@@ -41,6 +41,12 @@ func (a AgentInfo) IsZero() bool {
 	return !a.IsBusy && !a.IsReady && a.Model.ID == ""
 }
 
+// PromptQueueEvent carries the queued prompt list for a session.
+type PromptQueueEvent struct {
+	SessionID string   `json:"session_id"`
+	Prompts   []string `json:"prompts,omitempty"`
+}
+
 // AgentMessage represents a message sent to the agent.
 type AgentMessage struct {
 	SessionID   string       `json:"session_id"`
