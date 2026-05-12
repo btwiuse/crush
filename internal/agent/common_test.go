@@ -68,20 +68,18 @@ func testEnv(t *testing.T) fakeEnv {
 	err := os.MkdirAll(workingDir, 0o755)
 	require.NoError(t, err)
 
-	conn, err := db.Connect(t.Context(), t.TempDir())
+	q, err := db.Open(t.TempDir())
 	require.NoError(t, err)
 
-	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+	sessions := session.NewService(q)
 	messages := message.NewService(q)
 
 	permissions := permission.NewPermissionService(workingDir, true, []string{})
-	history := history.NewService(q, conn)
+	history := history.NewService(q)
 	filetrackerService := filetracker.NewService(q)
 	lspClients := csync.NewMap[string, *lsp.Client]()
 
 	t.Cleanup(func() {
-		conn.Close()
 		os.RemoveAll(workingDir)
 	})
 

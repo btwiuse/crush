@@ -119,18 +119,17 @@ func sessionSetup(cmd *cobra.Command) (context.Context, *sessionServices, func()
 		event.Init()
 	}
 
-	conn, err := db.Connect(ctx, dataDir)
+	queries, err := db.Open(dataDir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	queries := db.New(conn)
 	svc := &sessionServices{
-		sessions: session.NewService(queries, conn),
+		sessions: session.NewService(queries),
 		messages: message.NewService(queries),
 		cfg:      cfg,
 	}
-	return ctx, svc, func() { conn.Close() }, nil
+	return ctx, svc, func() {}, nil
 }
 
 func runSessionList(cmd *cobra.Command, _ []string) error {

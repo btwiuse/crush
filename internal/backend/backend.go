@@ -101,12 +101,12 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 		return nil, proto.Workspace{}, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	conn, err := db.Connect(b.ctx, cfg.Config().Options.DataDirectory)
+	q, err := db.Open(cfg.Config().Options.DataDirectory)
 	if err != nil {
 		return nil, proto.Workspace{}, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	appWorkspace, err := app.New(b.ctx, conn, cfg)
+	appWorkspace, err := app.New(b.ctx, q, cfg)
 	if err != nil {
 		return nil, proto.Workspace{}, fmt.Errorf("failed to create app workspace: %w", err)
 	}

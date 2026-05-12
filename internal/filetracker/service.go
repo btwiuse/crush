@@ -26,11 +26,11 @@ type Service interface {
 }
 
 type service struct {
-	q *db.Queries
+	q db.Querier
 }
 
 // NewService creates a new file tracker service.
-func NewService(q *db.Queries) Service {
+func NewService(q db.Querier) Service {
 	return &service{q: q}
 }
 

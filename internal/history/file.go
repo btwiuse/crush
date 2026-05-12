@@ -2,9 +2,6 @@ package history
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
-	"strings"
 
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -43,15 +40,13 @@ type Service interface {
 
 type service struct {
 	*pubsub.Broker[File]
-	db *sql.DB
-	q  *db.Queries
+	q db.Querier
 }
 
-func NewService(q *db.Queries, db *sql.DB) Service {
+func NewService(q db.Querier) Service {
 	return &service{
 		Broker: pubsub.NewBroker[File](),
 		q:      q,
-		db:     db,
 	}
 }
 
@@ -82,56 +77,19 @@ func (s *service) CreateVersion(ctx context.Context, sessionID, path, content st
 }
 
 func (s *service) createWithVersion(ctx context.Context, sessionID, path, content string, version int64) (File, error) {
-	// Maximum number of retries for transaction conflicts
-	const maxRetries = 3
-	var file File
-	var err error
-
-	// Retry loop for transaction conflicts
-	for attempt := range maxRetries {
-		// Start a transaction
-		tx, txErr := s.db.BeginTx(ctx, nil)
-		if txErr != nil {
-			return File{}, fmt.Errorf("failed to begin transaction: %w", txErr)
-		}
-
-		// Create a new queries instance with the transaction
-		qtx := s.q.WithTx(tx)
-
-		// Try to create the file within the transaction
-		dbFile, txErr := qtx.CreateFile(ctx, db.CreateFileParams{
-			ID:        uuid.New().String(),
-			SessionID: sessionID,
-			Path:      path,
-			Content:   content,
-			Version:   version,
-		})
-		if txErr != nil {
-			// Rollback the transaction
-			tx.Rollback()
-
-			// Check if this is a uniqueness constraint violation
-			if strings.Contains(txErr.Error(), "UNIQUE constraint failed") {
-				if attempt < maxRetries-1 {
-					// If we have retries left, increment version and try again
-					version++
-					continue
-				}
-			}
-			return File{}, txErr
-		}
-
-		// Commit the transaction
-		if txErr = tx.Commit(); txErr != nil {
-			return File{}, fmt.Errorf("failed to commit transaction: %w", txErr)
-		}
-
-		file = s.fromDBItem(dbFile)
-		s.Publish(pubsub.CreatedEvent, file)
-		return file, nil
+	dbFile, err := s.q.CreateFile(ctx, db.CreateFileParams{
+		ID:        uuid.New().String(),
+		SessionID: sessionID,
+		Path:      path,
+		Content:   content,
+		Version:   version,
+	})
+	if err != nil {
+		return File{}, err
 	}
-
-	return file, err
+	file := s.fromDBItem(dbFile)
+	s.Publish(pubsub.CreatedEvent, file)
+	return file, nil
 }
 
 func (s *service) Get(ctx context.Context, id string) (File, error) {

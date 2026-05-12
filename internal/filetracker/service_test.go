@@ -12,18 +12,16 @@ import (
 
 type testEnv struct {
 	ctx context.Context
-	q   *db.Queries
+	q   db.Querier
 	svc Service
 }
 
 func setupTest(t *testing.T) *testEnv {
 	t.Helper()
 
-	conn, err := db.Connect(t.Context(), t.TempDir())
+	q, err := db.Open(t.TempDir())
 	require.NoError(t, err)
-	t.Cleanup(func() { conn.Close() })
 
-	q := db.New(conn)
 	return &testEnv{
 		ctx: t.Context(),
 		q:   q,
@@ -68,11 +66,11 @@ func TestService_RecordRead_UpdatesTimestamp(t *testing.T) {
 	path := "/path/to/file.go"
 	env.createSession(t, sessionID)
 
-	env.svc.RecordRead(env.ctx, sessionID, path)
-	firstRead := env.svc.LastReadTime(env.ctx, sessionID, path)
-	require.False(t, firstRead.IsZero())
-
 	synctest.Test(t, func(t *testing.T) {
+		env.svc.RecordRead(env.ctx, sessionID, path)
+		firstRead := env.svc.LastReadTime(env.ctx, sessionID, path)
+		require.False(t, firstRead.IsZero())
+
 		time.Sleep(100 * time.Millisecond)
 		synctest.Wait()
 		env.svc.RecordRead(env.ctx, sessionID, path)

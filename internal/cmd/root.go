@@ -275,7 +275,7 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 		slog.Warn("Failed to register project", "error", err)
 	}
 
-	conn, err := db.Connect(ctx, cfg.Options.DataDirectory)
+	conn, err := db.Open(cfg.Options.DataDirectory)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -285,7 +285,6 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 
 	appInstance, err := app.New(ctx, conn, store)
 	if err != nil {
-		_ = conn.Close()
 		slog.Error("Failed to create app instance", "error", err)
 		return nil, nil, err
 	}

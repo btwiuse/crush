@@ -137,11 +137,10 @@ func runStats(cmd *cobra.Command, _ []string) error {
 
 	event.StatsViewed()
 
-	conn, err := db.Connect(ctx, dataDir)
+	conn, err := db.Open(dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
-	defer conn.Close()
 
 	stats, err := gatherStats(ctx, conn)
 	if err != nil {
@@ -178,8 +177,7 @@ func runStats(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func gatherStats(ctx context.Context, conn *sql.DB) (*Stats, error) {
-	queries := db.New(conn)
+func gatherStats(ctx context.Context, queries db.Querier) (*Stats, error) {
 
 	stats := &Stats{
 		GeneratedAt: time.Now(),

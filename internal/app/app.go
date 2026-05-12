@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -76,11 +75,10 @@ type App struct {
 }
 
 // New initializes a new application instance.
-func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, error) {
-	q := db.New(conn)
-	sessions := session.NewService(q, conn)
+func New(ctx context.Context, q db.Querier, store *config.ConfigStore) (*App, error) {
+	sessions := session.NewService(q)
 	messages := message.NewService(q)
-	files := history.NewService(q, conn)
+	files := history.NewService(q)
 	cfg := store.Config()
 	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
 	var allowedTools []string
@@ -113,12 +111,8 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 
 	go mcp.Initialize(ctx, app.Permissions, store)
 
-	// Release the shared database connection on shutdown. The pool
-	// closes the underlying *sql.DB when the last reference is released.
-	dataDir := cfg.Options.DataDirectory
 	app.cleanupFuncs = append(
 		app.cleanupFuncs,
-		func(context.Context) error { return db.Release(dataDir) },
 		func(ctx context.Context) error { return mcp.Close(ctx) },
 	)
 
