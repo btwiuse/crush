@@ -58,6 +58,13 @@ func saveDB(db *sql.DB, destPath string) error {
 	}
 	defer conn.Close()
 	return conn.Raw(func(c any) error {
-		return c.(*sqlite3.Conn).Backup("main", destPath)
+		// sql.Conn.Raw delivers the driver-internal *conn value. The ncruces
+		// driver exposes it via the exported driver.Conn interface whose
+		// Raw() method returns the underlying *sqlite3.Conn.
+		dc, ok := c.(driver.Conn)
+		if !ok {
+			return fmt.Errorf("unexpected driver connection type %T", c)
+		}
+		return dc.Raw().Backup("main", destPath)
 	})
 }
