@@ -263,6 +263,14 @@ type UI struct {
 	promptQueue        int
 	pillsView          string
 
+	// Cached agent state to avoid synchronous network calls in the UI
+	// update/view loop when connected to a remote server.
+	agentBusy  bool
+	agentReady bool
+
+	// yoloMode is a cached copy of the permission skip-requests flag.
+	yoloMode bool
+
 	// Todo spinner
 	todoSpinner    spinner.Model
 	todoIsSpinning bool
@@ -347,7 +355,9 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 
 	status := NewStatus(com, ui)
 
-	ui.setEditorPrompt(com.Workspace.PermissionSkipRequests())
+	yolo := com.Workspace.PermissionSkipRequests()
+	ui.yoloMode = yolo
+	ui.setEditorPrompt(yolo)
 	ui.randomizePlaceholders()
 	ui.textarea.Placeholder = ui.readyPlaceholder
 	ui.status = status
@@ -487,13 +497,15 @@ func (m *UI) loadMCPrompts() tea.Msg {
 // Update handles updates to the UI model.
 func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// Update prompt queue size from the workspace.
 	if m.hasSession() && m.isAgentBusy() {
-		queueSize := m.com.Workspace.AgentQueuedPrompts(m.session.ID)
-		if queueSize != m.promptQueue {
+		if queueSize := m.com.Workspace.AgentQueuedPrompts(m.session.ID); queueSize != m.promptQueue {
 			m.promptQueue = queueSize
 			m.updateLayoutAndSize()
 		}
 	}
+
 	// Update terminal capabilities
 	m.caps.Update(msg)
 	switch msg := msg.(type) {
@@ -522,6 +534,8 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setState(uiChat, m.focus)
 		m.session = msg.session
 		m.sessionFiles = msg.files
+		m.agentReady = true
+		m.agentBusy = hasInProgressTodo(msg.session.Todos)
 		cmds = append(cmds, m.startLSPs(msg.lspFilePaths()))
 		msgs, err := m.com.Workspace.ListMessages(context.Background(), m.session.ID)
 		if err != nil {
@@ -601,6 +615,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.session != nil && msg.Payload.ID == m.session.ID {
 			prevHasInProgress := hasInProgressTodo(m.session.Todos)
 			m.session = &msg.Payload
+			if hasInProgressTodo(m.session.Todos) {
+				m.agentBusy = true
+			} else {
+				m.agentBusy = false
+			}
 			if !prevHasInProgress && hasInProgressTodo(m.session.Todos) {
 				m.todoIsSpinning = true
 				cmds = append(cmds, m.todoSpinner.Tick)
@@ -621,8 +640,12 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Type {
 		case pubsub.CreatedEvent:
+			m.agentBusy = true
 			cmds = append(cmds, m.appendSessionMessage(msg.Payload))
 		case pubsub.UpdatedEvent:
+			if msg.Payload.IsFinished() {
+				m.agentBusy = false
+			}
 			cmds = append(cmds, m.updateSessionMessage(msg.Payload))
 		case pubsub.DeletedEvent:
 			m.chat.RemoveMessage(msg.Payload.ID)
@@ -920,7 +943,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.textarea.Placeholder = m.readyPlaceholder
 		}
-		if m.com.Workspace.PermissionSkipRequests() {
+		if m.yoloMode {
 			m.textarea.Placeholder = "Yolo mode!"
 		}
 	}
@@ -1345,6 +1368,7 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionToggleYoloMode:
 		yolo := !m.com.Workspace.PermissionSkipRequests()
 		m.com.Workspace.PermissionSetSkipRequests(yolo)
+		m.yoloMode = yolo
 		m.setEditorPrompt(yolo)
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionToggleNotifications:
@@ -2111,6 +2135,7 @@ func (m *UI) drawHeader(scr uv.Screen, area uv.Rectangle) {
 		m.detailsOpen,
 		area.Dx(),
 		m.hyperCredits,
+		countLSPDiagnostics(m.lspStates),
 	)
 }
 
@@ -2288,7 +2313,7 @@ func (m *UI) ShortHelp() []key.Binding {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
 				cancelBinding.SetHelp("esc", "press again to cancel")
-			} else if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, cancelBinding)
@@ -2367,7 +2392,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			cancelBinding := k.Chat.Cancel
 			if m.isCanceling {
 				cancelBinding.SetHelp("esc", "press again to cancel")
-			} else if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+			} else if m.promptQueue > 0 {
 				cancelBinding.SetHelp("esc", "clear queue")
 			}
 			binds = append(binds, []key.Binding{cancelBinding})
@@ -3029,15 +3054,24 @@ func (m *UI) textareaWord() string {
 }
 
 // isWhitespace returns true if the byte is a whitespace character.
+// countLSPDiagnostics returns the total diagnostic count across all LSP clients.
+func countLSPDiagnostics(states map[string]app.LSPClientInfo) int {
+	var count int
+	for _, s := range states {
+		count += s.DiagnosticCount
+	}
+	return count
+}
+
 func isWhitespace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
-// isAgentBusy returns true if the agent coordinator exists and is currently
-// busy processing a request.
+// isAgentBusy returns true if the agent is currently busy processing a
+// request. It uses cached state rather than making synchronous network
+// calls, which would block the UI loop on remote servers.
 func (m *UI) isAgentBusy() bool {
-	return m.com.Workspace.AgentIsReady() &&
-		m.com.Workspace.AgentIsBusy()
+	return m.agentReady && m.agentBusy
 }
 
 // hasSession returns true if there is an active session with a valid ID.
@@ -3124,7 +3158,9 @@ func (m *UI) refreshStyles() {
 
 // sendMessage sends a message with the given content and attachments.
 func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.Cmd {
-	if !m.com.Workspace.AgentIsReady() {
+	// Only check agent readiness if we already have a session — a first
+	// message with no session creates one and triggers agent execution.
+	if m.hasSession() && !m.agentReady && !m.com.Workspace.AgentIsReady() {
 		return util.ReportError(fmt.Errorf("coder agent is not initialized"))
 	}
 
@@ -3143,6 +3179,8 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 		}
 		m.setState(uiChat, m.focus)
 	}
+	m.agentReady = true
+	m.agentBusy = true
 
 	ctx := context.Background()
 	cmds = append(cmds, func() tea.Msg {
@@ -3189,7 +3227,7 @@ func (m *UI) cancelAgent() tea.Cmd {
 		return nil
 	}
 
-	if !m.com.Workspace.AgentIsReady() {
+	if !m.agentReady {
 		return nil
 	}
 
@@ -3204,7 +3242,7 @@ func (m *UI) cancelAgent() tea.Cmd {
 	}
 
 	// Check if there are queued prompts - if so, clear the queue.
-	if m.com.Workspace.AgentQueuedPrompts(m.session.ID) > 0 {
+	if m.promptQueue > 0 {
 		m.com.Workspace.AgentClearQueue(m.session.ID)
 		return nil
 	}

@@ -314,6 +314,10 @@ func setupClientServerWorkspace(cmd *cobra.Command) (workspace.Workspace, func()
 		}
 	}
 
+	// Populate agent state cache with a one-time RPC so reads
+	// work before the event subscription starts flowing.
+	clientWs.SyncAgentState(cmd.Context())
+
 	return clientWs, cleanupServer, nil
 }
 
@@ -579,6 +583,9 @@ func resolveWorkspaceSessionID(ctx context.Context, ws workspace.Workspace, id s
 }
 
 func ResolveCwd(cmd *cobra.Command) (string, error) {
+	if v := os.Getenv("CRUSH_CWD"); v != "" {
+		return v, nil
+	}
 	cwd, _ := cmd.Flags().GetString("cwd")
 	if cwd != "" {
 		err := os.Chdir(cwd)

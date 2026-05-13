@@ -91,6 +91,10 @@ func wrapEvent(ev any) *pubsub.Payload {
 				Type:         proto.AgentEventType(e.Payload.Type),
 			},
 		})
+	case pubsub.Event[proto.AgentInfo]:
+		return envelope(pubsub.PayloadTypeAgentState, e)
+	case pubsub.Event[proto.PromptQueueEvent]:
+		return envelope(pubsub.PayloadTypeAgentPromptQueue, e)
 	default:
 		slog.Warn("Unrecognized event type for SSE wrapping", "type", fmt.Sprintf("%T", ev))
 		return nil
