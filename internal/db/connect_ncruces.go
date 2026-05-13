@@ -3,31 +3,61 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
+	"github.com/ncruces/go-sqlite3/vfs/memdb"
 )
 
+// openDB opens a named in-memory SQLite database backed by the memdb VFS. If
+// an on-disk database file already exists at dbPath, its raw bytes are loaded
+// into the memdb before the connection is opened.
 func openDB(dbPath string) (*sql.DB, error) {
+	name := memDBName(dbPath)
+
+	// Read the existing on-disk database, if present, so we can seed the
+	// in-memory database with its contents.
+	var data []byte
+	if raw, err := os.ReadFile(dbPath); err == nil {
+		data = raw
+	}
+
+	// Create the named shared-memory database from the existing bytes.
+	// Passing nil creates an empty database. memdb.Create also handles
+	// converting WAL-mode files to rollback-journal format.
+	memdb.Create(name, data)
+
 	// Use BEGIN IMMEDIATE so writers acquire the reserved lock up front,
-	// preventing deferred-to-writer upgrade deadlocks. The "file:" prefix
-	// is required for the ncruces driver to parse query parameters.
-	dsn := fmt.Sprintf("file:%s?_txlock=immediate", dbPath)
+	// preventing deferred-to-writer upgrade deadlocks.
+	dsn := fmt.Sprintf("file:/%s?vfs=memdb&_txlock=immediate", name)
 	db, err := driver.Open(dsn, func(c *sqlite3.Conn) error {
-		// Set pragmas for better performance via _pragma query params.
-		// Format: PRAGMA name = value;
-		for name, value := range pragmas {
-			if err := c.Exec(fmt.Sprintf("PRAGMA %s = %s;", name, value)); err != nil {
-				return fmt.Errorf("failed to set pragma %q: %w", name, err)
+		for key, val := range memoryPragmas {
+			if err := c.Exec(fmt.Sprintf("PRAGMA %s = %s;", key, val)); err != nil {
+				return fmt.Errorf("failed to set pragma %q: %w", key, err)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to open database: %w", err)
+		return nil, fmt.Errorf("failed to open in-memory database: %w", err)
 	}
 
 	return db, nil
+}
+
+// saveDB writes the in-memory database to the given file path using the
+// SQLite online-backup API.
+func saveDB(db *sql.DB, destPath string) error {
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return conn.Raw(func(c any) error {
+		return c.(*sqlite3.Conn).Backup("main", destPath)
+	})
 }
