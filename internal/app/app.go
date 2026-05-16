@@ -110,7 +110,9 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore) (*App, er
 	app.setupEvents()
 
 	// Check for updates in the background.
-	go app.checkForUpdates(ctx)
+	if os.Getenv("DO_NOT_UPDATE") == "" {
+		go app.checkForUpdates(ctx)
+	}
 
 	go mcp.Initialize(ctx, app.Permissions, store)
 
