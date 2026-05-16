@@ -5,8 +5,7 @@ package cmd
 import (
 	"fmt"
 	"os"
-
-	"golang.org/x/sys/unix"
+	"syscall"
 )
 
 // acquireSpawnLock takes an exclusive flock on the given file (creating
@@ -17,12 +16,12 @@ func acquireSpawnLock(path string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("open spawn lock %q: %v", path, err)
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("flock spawn lock %q: %v", path, err)
 	}
 	return func() {
-		_ = unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
 }
