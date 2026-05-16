@@ -76,7 +76,7 @@ func Connect(ctx context.Context, dataDir string) (*sql.DB, error) {
 		return entry.db, nil
 	}
 
-	conn, err := openDB(dbPath)
+	conn, err := openDB(":memory:")
 	if err != nil {
 		return nil, err
 	}
