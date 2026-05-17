@@ -1,0 +1,7 @@
+{
+  "name": "crush-wasm",
+  "private": true,
+  "scripts": {
+    "vercel-build": "npm install -g bun && bash ./build.sh"
+  }
+}
