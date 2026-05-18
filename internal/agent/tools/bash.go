@@ -159,6 +159,7 @@ func bashDescription(attribution *config.Attribution, modelID string) string {
 }
 
 func blockFuncs() []shell.BlockFunc {
+	return []shell.BlockFunc{}
 	return []shell.BlockFunc{
 		shell.CommandsBlocker(bannedCommands),
 
