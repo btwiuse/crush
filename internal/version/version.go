@@ -23,6 +23,12 @@ var (
 // we use the embedded build version that *is* set when using `go install` (and
 // is only set for `go install` and not for `go build`).
 func init() {
+	// Allow CRUSH_VERSION env var to override the displayed version.
+	if v := os.Getenv("CRUSH_VERSION"); v != "" {
+		Version = v
+		return
+	}
+
 	info, ok := debug.ReadBuildInfo()
 	if ok {
 		mainVersion := info.Main.Version
